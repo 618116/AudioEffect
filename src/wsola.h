@@ -71,9 +71,11 @@ public:
     // How many input samples you should provide for the given output length.
     int getNumNeededSamples(int outputSamples) const {
         if (std::abs(ratio_ - 1.0f) < 0.005f) return outputSamples;
-        // We consume input at 1/ratio speed. Add margin for seek window.
-        return (int)std::ceil((double)outputSamples / (double)ratio_)
-               + cfg_.seekWin + cfg_.overlapLen;
+        // We consume input at ratio speed. Add margin for seek + sequence lookahead.
+        int totalAhead = (int)std::ceil((double)outputSamples * (double)ratio_)
+                       + cfg_.seqLen + cfg_.seekWin;
+        int available  = histLen_ - (int)readPos_;
+        return std::max(0, totalAhead - available);
     }
 
     // Process: read from input, write to output.
@@ -142,8 +144,8 @@ public:
             // Save tail of this sequence for next crossfade
             saveOverlap(splicePos + cfg_.seqLen - cfg_.overlapLen);
 
-            // Advance read position: consume input at 1/ratio rate
-            readPos_ += (double)cfg_.seqLen / (double)r;
+            // Advance read position: consume input at ratio rate
+            readPos_ += (double)cfg_.seqLen * (double)r;
         }
 
         // --- Compact history: discard consumed samples ---
@@ -154,7 +156,7 @@ public:
     float latencyMs()    const { return 1000.0f * latencySamples() / sr_; }
 
 private:
-    int   sr_  = 48000;
+    int   sr_  = 44100;
     int   ch_  = 2;
     float ratio_ = 1.0f;
     Config cfg_;
