@@ -4,7 +4,7 @@ EMCC        = python $(EMSDK)/upstream/emscripten/emcc.py
 SRC_DIR     = src
 BUILD_DIR   = build
 
-SRC         = $(SRC_DIR)/wsola_wrapper.cpp
+SRC         = $(SRC_DIR)/time_stretcher_wrapper.cpp
 OUT         = $(BUILD_DIR)/wsola.js
 
 CXXFLAGS    = -O0 -g -std=c++17 -I$(SRC_DIR)
@@ -22,7 +22,7 @@ PROC_SRC    = sample/wsola-processor.js
 
 all: $(WORKLET)
 
-$(OUT): $(SRC) $(SRC_DIR)/wsola.h $(SRC_DIR)/ring_buffer.h | $(BUILD_DIR)
+$(OUT): $(SRC) $(SRC_DIR)/wsola.h $(SRC_DIR)/time_stretcher.h $(SRC_DIR)/ring_buffer.h | $(BUILD_DIR)
 	$(EMCC) $(CXXFLAGS) $(LDFLAGS) $(SRC) -o $(OUT)
 
 $(WORKLET): $(OUT) $(PROC_SRC)
