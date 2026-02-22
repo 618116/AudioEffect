@@ -18,7 +18,7 @@
 class PhaseVocoder : public TimeStretcher {
 protected:
     void onInit() override {
-        fft_size_ = next_power_of_two(frame_size_);
+        fft_size_ = kFixedFftSize_;
         analysis_hop_ = std::max(1, fft_size_ / 4);  // Typical 75% overlap.
         bin_count_ = (fft_size_ / 2) + 1;
         fft_.init(fft_size_);
@@ -34,6 +34,8 @@ protected:
         for (int ch = 0; ch < channel_count_; ++ch) {
             std::fill(hop_frame_[ch].begin(), hop_frame_[ch].end(), 0.0f);
             std::fill(time_frame_[ch].begin(), time_frame_[ch].end(), 0.0f);
+            std::fill(synthesis_accum_[ch].begin(), synthesis_accum_[ch].end(), 0.0f);
+            std::fill(synthesis_norm_[ch].begin(), synthesis_norm_[ch].end(), 0.0f);
             std::fill(prev_phase_[ch].begin(), prev_phase_[ch].end(), 0.0f);
             std::fill(sum_phase_[ch].begin(), sum_phase_[ch].end(), 0.0f);
         }
@@ -50,15 +52,22 @@ protected:
     }
 
 private:
+    static constexpr int kFixedFftSize_ = 512;
+    static constexpr float kPi_ = 3.14159265358979323846f;
+    static constexpr float kTwoPi_ = 2.0f * kPi_;
     int fft_size_ = 0;
     int analysis_hop_ = 0;
     int bin_count_ = 0;
     double analysis_read_pos_ = 0.0;
     bool has_phase_history_ = false;
     SimpleFFT fft_;
+    static constexpr float kNormFloor_ = 1.0e-6f;
+    static constexpr float kDrainEpsilon_ = 1.0e-8f;
 
     std::vector<float> window_;
     std::vector<std::vector<float>> time_frame_;
+    std::vector<std::vector<float>> synthesis_accum_;
+    std::vector<std::vector<float>> synthesis_norm_;
     std::vector<std::vector<float>> hop_frame_;
     std::vector<float*> hop_ptrs_;
 
@@ -66,10 +75,10 @@ private:
     std::vector<std::vector<float>> prev_phase_;
     std::vector<std::vector<float>> sum_phase_;
 
-    static int next_power_of_two(int value) {
-        int n = 1;
-        while (n < value) n <<= 1;
-        return std::max(2, n);
+    static float wrap_phase(float phase) {
+        phase = std::fmod(phase + kPi_, kTwoPi_);
+        if (phase < 0.0f) phase += kTwoPi_;
+        return phase - kPi_;
     }
 
     int synthesis_hop() const {
@@ -82,6 +91,8 @@ private:
 
     void resize_state_buffers() {
         time_frame_.assign(channel_count_, std::vector<float>(fft_size_, 0.0f));
+        synthesis_accum_.assign(channel_count_, std::vector<float>(fft_size_, 0.0f));
+        synthesis_norm_.assign(channel_count_, std::vector<float>(fft_size_, 0.0f));
         hop_frame_.assign(channel_count_, std::vector<float>(analysis_hop_, 0.0f));
         spectrum_.assign(
             channel_count_, std::vector<std::complex<float>>(bin_count_));
@@ -105,29 +116,94 @@ private:
 
         const int read_pos = static_cast<int>(std::floor(analysis_read_pos_));
         const int available = input_ring_buffer_.buffered();
+        int valid_samples = fft_size_;
+        bool frame_is_fully_padded = false;
 
         if (read_pos + fft_size_ > available) {
             if (!input_ended_) return false;
-            // End-of-input handling is intentionally left as TODO.
-            return false;
+            valid_samples = std::max(0, available - read_pos);
+            frame_is_fully_padded = (valid_samples == 0);
         }
 
         if (output_ring_buffer_.writable() < syn_hop) return false;
 
+        float hop_peak = 0.0f;
         for (int ch = 0; ch < channel_count_; ++ch) {
-            input_ring_buffer_.peek(ch, time_frame_[ch].data(), 0, read_pos, fft_size_);
+            auto& frame = time_frame_[ch];
+            auto& accum = synthesis_accum_[ch];
+            auto& norm = synthesis_norm_[ch];
 
-            // TODO(phase-vocoder):
-            // 1) Apply analysis window.
-            // 2) Run FFT (fft_.forward_real) -> spectrum_[ch].
-            // 3) Compute phase delta vs prev_phase_[ch] using expected bin advance.
-            // 4) Accumulate corrected phase into sum_phase_[ch].
-            // 5) Rebuild complex bins with stretched phase.
-            // 6) Run IFFT (fft_.inverse_real) and overlap-add into synthesis buffer.
-            // 7) Export the next syn_hop samples into hop_frame_[ch].
+            std::fill(frame.begin(), frame.end(), 0.0f);
+            if (valid_samples > 0) {
+                input_ring_buffer_.peek(ch, frame.data(), 0, read_pos, valid_samples);
+            }
 
-            // Placeholder so the class stays compile-safe until DSP is added.
-            std::fill(hop_frame_[ch].begin(), hop_frame_[ch].end(), 0.0f);
+            for (int i = 0; i < fft_size_; ++i) {
+                frame[i] *= window_[i];
+            }
+
+            fft_.forward_real(frame.data(), spectrum_[ch].data());
+
+            // Basic phase vocoder update: estimate per-bin phase increment on
+            // analysis hop, then propagate phase on synthesis hop.
+            auto& prev = prev_phase_[ch];
+            auto& sum = sum_phase_[ch];
+            for (int k = 0; k < bin_count_; ++k) {
+                const float mag = std::abs(spectrum_[ch][k]);
+                const float phase = std::arg(spectrum_[ch][k]);
+
+                if (!has_phase_history_) {
+                    prev[k] = phase;
+                    sum[k] = phase;
+                    spectrum_[ch][k] = std::polar(mag, phase);
+                    continue;
+                }
+
+                const float expected_analysis =
+                    kTwoPi_ * static_cast<float>(k) *
+                    static_cast<float>(analysis_hop_) /
+                    static_cast<float>(fft_size_);
+                const float expected_synthesis =
+                    kTwoPi_ * static_cast<float>(k) *
+                    static_cast<float>(syn_hop) /
+                    static_cast<float>(fft_size_);
+
+                const float delta = wrap_phase(phase - prev[k] - expected_analysis);
+                sum[k] = wrap_phase(sum[k] + expected_synthesis +
+                                    delta * static_cast<float>(syn_hop) /
+                                        static_cast<float>(analysis_hop_));
+                prev[k] = phase;
+                spectrum_[ch][k] = std::polar(mag, sum[k]);
+            }
+
+            fft_.inverse_real(spectrum_[ch].data(), frame.data());
+
+            for (int i = 0; i < fft_size_; ++i) {
+                const float w = window_[i];
+                const float w2 = w * w;
+                accum[i] += frame[i] * w;
+                norm[i] += w2;
+            }
+
+            for (int i = 0; i < syn_hop; ++i) {
+                const float denom = norm[i];
+                const float out =
+                    (denom > kNormFloor_) ? (accum[i] / denom) : 0.0f;
+                hop_frame_[ch][i] = out;
+                hop_peak = std::max(hop_peak, std::fabs(out));
+            }
+
+            const int remain = fft_size_ - syn_hop;
+            if (remain > 0) {
+                std::move(accum.begin() + syn_hop, accum.end(), accum.begin());
+                std::move(norm.begin() + syn_hop, norm.end(), norm.begin());
+            }
+            std::fill(accum.begin() + remain, accum.end(), 0.0f);
+            std::fill(norm.begin() + remain, norm.end(), 0.0f);
+        }
+
+        if (input_ended_ && frame_is_fully_padded && hop_peak <= kDrainEpsilon_) {
+            return false;
         }
 
         has_phase_history_ = true;
