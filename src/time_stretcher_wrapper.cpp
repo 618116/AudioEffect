@@ -27,9 +27,10 @@ int ts_getNumNeededSamples(int outputSamples) {
 }
 
 EMSCRIPTEN_KEEPALIVE
-void ts_process(const float* const* input, int inputSamples,
-                float** output, int outputSamples) {
-    g_processor.process(input, inputSamples, output, outputSamples);
+int ts_process(const float* const* input, int inputSamples, int inputEnded,
+               float** output, int outputSamples) {
+    return g_processor.process(
+        input, inputSamples, inputEnded != 0, output, outputSamples);
 }
 
 }

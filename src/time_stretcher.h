@@ -42,6 +42,7 @@ public:
     void reset() {
         input_ring_buffer_.reset();
         output_ring_buffer_.reset();
+        input_ended_ = false;
         onReset();
     }
 
@@ -57,10 +58,15 @@ public:
             std::ceil(output_sample_count * static_cast<double>(time_stretch_ratio_)));
     }
 
-    void process(const float* const* input, int input_sample_count,
-                 float** output, int output_sample_count) {
+    int process(const float* const* input, int input_sample_count, bool input_ended,
+                float** output, int output_sample_count) {
         // Push input into input ring buffer
-        input_ring_buffer_.write(input, 0, input_sample_count);
+        if (input_sample_count > 0) {
+            input_ring_buffer_.write(input, 0, input_sample_count);
+        }
+
+        // Once end-of-input is signaled, keep it sticky until reset.
+        input_ended_ = input_ended_ || input_ended;
 
         // Subclass fills output ring buffer
         produce_frames(output_sample_count);
@@ -77,6 +83,8 @@ public:
                             (output_sample_count - to_drain) * sizeof(float));
             }
         }
+
+        return to_drain;
     }
 
 protected:
@@ -91,6 +99,7 @@ protected:
     int channel_count_ = 2;
     int frame_size_ = 0;
     float time_stretch_ratio_ = 1.0f;
+    bool input_ended_ = false;
 
     MultiChannelRingBuffer input_ring_buffer_;
     MultiChannelRingBuffer output_ring_buffer_;
