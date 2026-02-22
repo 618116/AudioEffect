@@ -1,9 +1,10 @@
 #pragma once
 /* ============================================================================
- * wsola.h - オーバーラップ加算(OLA)によるタイムストレッチャー（類似度検索なし）
+ * wsola.h - WSOLA タイムストレッチャー（相互相関による類似度検索付き）
  *
  * TimeStretcher から入出力リングバッファ管理を継承。
- * produce_frames(): 比率に応じたホップベースのオーバーラップ加算を実装。
+ * produce_frames(): 相互相関で最適オフセットを探索し、
+ *                   Hann窓によるオーバーラップ加算でフレームを合成。
  * ============================================================================ */
 
 #include "time_stretcher.h"
@@ -14,10 +15,11 @@ protected:
     void onInit() override {
         /* 合成ホップサイズをフレームサイズの半分に設定（最小1） */
         synthesis_hop_ = std::max(1, frame_size_ / 2);
+        /* 相互相関の探索範囲をホップサイズの半分に設定 */
+        search_range_ = synthesis_hop_ / 2;
 
-        /* フェードイン・フェードアウト用のウィンドウバッファを確保 */
-        fade_in_.assign(synthesis_hop_, 0.0f);
-        fade_out_.assign(synthesis_hop_, 0.0f);
+        /* Hannベースのクロスフェードカーブを生成 */
+        generate_hann_crossfade(synthesis_hop_, fade_in_, fade_out_);
 
         /* 前フレーム保持用バッファを全チャンネル分確保 */
         prev_frame_.assign(channel_count_, std::vector<float>(frame_size_, 0.0f));
@@ -29,22 +31,10 @@ protected:
             hop_ptrs_[ch] = hop_frame_[ch].data();
         }
 
-        /* ホップサイズが1の場合、フェード不要なので即リターン */
-        if (synthesis_hop_ == 1) {
-            fade_in_[0] = 1.0f;
-            fade_out_[0] = 0.0f;
-            return;
-        }
+        /* 相互相関の候補領域読み込み用バッファを確保 */
+        correlation_buf_.assign(synthesis_hop_, 0.0f);
 
-        /* Hann窓に基づくフェードイン・フェードアウトカーブを生成 */
-        const double pi = 3.14159265358979323846;
-        const double denom = static_cast<double>(synthesis_hop_ - 1); /* 正規化用の分母 */
-        for (int i = 0; i < synthesis_hop_; ++i) {
-            double x = static_cast<double>(i) / denom; /* 0.0〜1.0 に正規化 */
-            float fade_in = static_cast<float>(0.5 - 0.5 * std::cos(pi * x)); /* Hann窓によるフェードイン値 */
-            fade_in_[i] = fade_in;
-            fade_out_[i] = 1.0f - fade_in; /* フェードアウトはフェードインの補数 */
-        }
+        /* フェードカーブ生成は TimeStretcher 側の共通ヘルパーに委譲 */
     }
 
     /* 必要な出力サンプル数に達するまでホップ単位で生成 */
@@ -70,6 +60,7 @@ protected:
 
 private:
     int synthesis_hop_ = 0;                          /* 合成ホップサイズ（出力の刻み幅） */
+    int search_range_ = 0;                           /* 相互相関の探索範囲（片側） */
     double read_position_ = 0.0;                     /* 入力バッファ上の現在の読み取り位置（小数点精度） */
     bool has_prev_frame_ = false;                    /* 前フレームが存在するかどうか */
     static constexpr float kDrainEpsilon_ = 1.0e-8f; /* 終端判定用の微小閾値 */
@@ -78,12 +69,52 @@ private:
     std::vector<std::vector<float>> prev_frame_;     /* 前フレームデータ（チャンネル×フレームサイズ） */
     std::vector<std::vector<float>> hop_frame_;      /* ホップ出力データ（チャンネル×ホップサイズ） */
     std::vector<float*> hop_ptrs_;                   /* hop_frame_ の各チャンネルへのポインタ配列 */
+    std::vector<float> correlation_buf_;             /* 相互相関の候補領域読み込み用バッファ */
+
+    /* 相互相関により最適なフレームオフセットを探索する */
+    int find_best_offset(int nominal_read_pos) {
+        int available = input_ring_buffer_.buffered();
+        /* テンプレート：前フレーム末尾の synthesis_hop_ サンプル（ch0 のみ使用） */
+        const float* tmpl = prev_frame_[0].data() + (frame_size_ - synthesis_hop_);
+
+        float best_corr = -1e30f;
+        int best_delta = 0;
+
+        for (int delta = -search_range_; delta <= search_range_; ++delta) {
+            int candidate_pos = nominal_read_pos + delta;
+            /* 候補位置が有効範囲外ならスキップ */
+            if (candidate_pos < 0
+                || candidate_pos + synthesis_hop_ > available) {
+                continue;
+            }
+            /* 候補領域を入力バッファから読み込み */
+            input_ring_buffer_.peek(
+                0, correlation_buf_.data(), 0, candidate_pos, synthesis_hop_);
+            /* 相互相関を計算 */
+            float corr = 0.0f;
+            for (int i = 0; i < synthesis_hop_; ++i) {
+                corr += tmpl[i] * correlation_buf_[i];
+            }
+            if (corr > best_corr) {
+                best_corr = corr;
+                best_delta = delta;
+            }
+        }
+        return best_delta;
+    }
 
     /* オーバーラップ加算で1ホップ分の合成出力を生成する */
     bool produce_one_hop() {
         int read_pos = static_cast<int>(std::floor(read_position_)); /* 読み取り位置を整数化 */
         int available = input_ring_buffer_.buffered(); /* 入力バッファの残りサンプル数 */
         bool frame_is_fully_padded = false; /* フレーム全体がゼロ埋めかどうか */
+
+        /* 相互相関による最適オフセット探索（前フレームが存在する場合のみ） */
+        if (has_prev_frame_ && !input_ended_) {
+            int delta = find_best_offset(read_pos);
+            read_pos += delta;
+            read_position_ += static_cast<double>(delta);
+        }
 
         /* 入力バッファに十分なサンプルがあるか確認 */
         if (read_pos + frame_size_ > available) {
@@ -179,8 +210,9 @@ private:
 
     /* 読み取り済みの入力サンプルを破棄してバッファを圧縮する */
     void compact() {
-        /* 安全に破棄できるサンプル数を計算（読み取り位置 - フレームサイズ分の余裕） */
-        int safe_discard = static_cast<int>(std::floor(read_position_)) - frame_size_;
+        /* 安全に破棄できるサンプル数を計算（読み取り位置 - フレームサイズ - 探索範囲分の余裕） */
+        int safe_discard = static_cast<int>(std::floor(read_position_))
+                         - frame_size_ - search_range_;
         if (safe_discard <= 0) {
             /* 破棄不可：入力終了かつバッファ空の場合、読み取り位置を制限 */
             if (input_ended_ && input_ring_buffer_.buffered() == 0

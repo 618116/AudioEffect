@@ -24,7 +24,7 @@ public:
         channel_count_ = channel_count;
         frame_size_ = sampling_rate_ * FRAME_MS / 1000;
 
-        int capacity = frame_size_ * 4;
+        int capacity = frame_size_ * 6;
         input_ring_buffer_.init(channel_count_, capacity);
         output_ring_buffer_.init(channel_count_, capacity);
 
@@ -94,6 +94,47 @@ protected:
     // Optional hooks for subclass-specific init/reset.
     virtual void onInit() {}
     virtual void onReset() {}
+
+    // Build a full Hann window: w[n] = 0.5 - 0.5 cos(2*pi*n/(N-1))
+    static void generate_hann_window(int size, std::vector<float>& window) {
+        window.assign(size, 0.0f);
+        if (size <= 0) return;
+        if (size == 1) {
+            window[0] = 1.0f;
+            return;
+        }
+
+        const double pi = 3.14159265358979323846;
+        const double denom = static_cast<double>(size - 1);
+        for (int i = 0; i < size; ++i) {
+            const double phase = (2.0 * pi * static_cast<double>(i)) / denom;
+            window[i] = static_cast<float>(0.5 - 0.5 * std::cos(phase));
+        }
+    }
+
+    // Build crossfade ramps from a half-Hann shape.
+    // fade_in[n] = 0.5 - 0.5 cos(pi*n/(N-1))
+    // fade_out[n] = 1 - fade_in[n]
+    static void generate_hann_crossfade(int size, std::vector<float>& fade_in,
+                                        std::vector<float>& fade_out) {
+        fade_in.assign(size, 0.0f);
+        fade_out.assign(size, 0.0f);
+        if (size <= 0) return;
+        if (size == 1) {
+            fade_in[0] = 1.0f;
+            fade_out[0] = 0.0f;
+            return;
+        }
+
+        const double pi = 3.14159265358979323846;
+        const double denom = static_cast<double>(size - 1);
+        for (int i = 0; i < size; ++i) {
+            const double x = static_cast<double>(i) / denom;
+            const float in = static_cast<float>(0.5 - 0.5 * std::cos(pi * x));
+            fade_in[i] = in;
+            fade_out[i] = 1.0f - in;
+        }
+    }
 
     int sampling_rate_ = 44100;
     int channel_count_ = 2;
