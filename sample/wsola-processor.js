@@ -37,7 +37,7 @@ class WSOLAProcessor extends AudioWorkletProcessor {
       const mod = await Module();
       this.wasm = mod;
       this.numChannels = ch;
-      mod._wsola_init(sr, ch);
+      mod._ts_init(sr, ch);
       this.allocBuffers(ch);
       this.ready = true;
       this.port.postMessage({ type: 'ready' });
@@ -68,29 +68,29 @@ class WSOLAProcessor extends AudioWorkletProcessor {
         this.audioData = data.channelData;
         this.totalSamples = data.channelData[0].length;
         this.readPos = 0;
-        if (this.wasm) this.wasm._wsola_reset();
+        if (this.wasm) this.wasm._ts_reset();
         break;
       case 'play':
         if (this.readPos >= this.totalSamples) {
           this.readPos = 0;
-          if (this.wasm) this.wasm._wsola_reset();
+          if (this.wasm) this.wasm._ts_reset();
         }
         this.playing = true;
         break;
       case 'stop':
         this.playing = false;
         this.readPos = 0;
-        if (this.wasm) this.wasm._wsola_reset();
+        if (this.wasm) this.wasm._ts_reset();
         break;
       case 'pause':
         this.playing = false;
         break;
       case 'ratio':
-        if (this.wasm) this.wasm._wsola_setRatio(data.value);
+        if (this.wasm) this.wasm._ts_setRatio(data.value);
         break;
       case 'seek':
         this.readPos = Math.max(0, Math.floor(data.position));
-        if (this.wasm) this.wasm._wsola_reset();
+        if (this.wasm) this.wasm._ts_reset();
         break;
     }
   }
@@ -101,7 +101,7 @@ class WSOLAProcessor extends AudioWorkletProcessor {
     const output = outputs[0];
     const M = this.wasm;
     const ch = this.numChannels;
-    const needed = M._wsola_getNumNeededSamples(BLOCK_SIZE);
+    const needed = M._ts_getNumNeededSamples(BLOCK_SIZE);
 
     if (needed > MAX_INPUT) return true;
 
@@ -127,7 +127,7 @@ class WSOLAProcessor extends AudioWorkletProcessor {
     this.readPos += avail;
 
     // WSOLA process
-    M._wsola_process(this.inPtrs, needed, this.outPtrs, BLOCK_SIZE);
+    M._ts_process(this.inPtrs, needed, this.outPtrs, BLOCK_SIZE);
 
     // Copy output from WASM heap
     for (let c = 0; c < ch; c++) {
