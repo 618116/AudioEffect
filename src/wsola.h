@@ -13,8 +13,14 @@ class WSOLA : public TimeStretcher {
 protected:
     /* 初期化処理（TimeStretcher から呼ばれる） */
     void onInit() override {
+        // WSOLA uses a fixed internal frame size and ignores base frame_size_.
+        wsola_frame_size_ = kFixedWsolaFrameSize_;
+        for (int ch = 0; ch < channel_count_; ++ch) {
+            temp_frame_[ch].assign(wsola_frame_size_, 0.0f);
+            temp_ptrs_[ch] = temp_frame_[ch].data();
+        }
         /* 合成ホップサイズをフレームサイズの半分に設定（最小1） */
-        synthesis_hop_ = std::max(1, frame_size_ / 2);
+        synthesis_hop_ = std::max(1, wsola_frame_size_ / 2);
         /* 相互相関の探索範囲をホップサイズの半分に設定 */
         search_range_ = synthesis_hop_ / 2;
 
@@ -22,7 +28,7 @@ protected:
         generate_hann_crossfade(synthesis_hop_, fade_in_, fade_out_);
 
         /* 前フレーム保持用バッファを全チャンネル分確保 */
-        prev_frame_.assign(channel_count_, std::vector<float>(frame_size_, 0.0f));
+        prev_frame_.assign(channel_count_, std::vector<float>(wsola_frame_size_, 0.0f));
         /* ホップ単位の出力バッファを全チャンネル分確保 */
         hop_frame_.assign(channel_count_, std::vector<float>(synthesis_hop_, 0.0f));
         /* 各チャンネルのホップバッファへのポインタ配列を構築 */
@@ -59,6 +65,8 @@ protected:
     }
 
 private:
+    static constexpr int kFixedWsolaFrameSize_ = 512;
+    int wsola_frame_size_ = kFixedWsolaFrameSize_;
     int synthesis_hop_ = 0;                          /* 合成ホップサイズ（出力の刻み幅） */
     int search_range_ = 0;                           /* 相互相関の探索範囲（片側） */
     double read_position_ = 0.0;                     /* 入力バッファ上の現在の読み取り位置（小数点精度） */
@@ -75,7 +83,8 @@ private:
     int find_best_offset(int nominal_read_pos) {
         int available = input_ring_buffer_.buffered();
         /* テンプレート：前フレーム末尾の synthesis_hop_ サンプル（ch0 のみ使用） */
-        const float* tmpl = prev_frame_[0].data() + (frame_size_ - synthesis_hop_);
+        const float* tmpl =
+            prev_frame_[0].data() + (wsola_frame_size_ - synthesis_hop_);
 
         float best_corr = -1e30f;
         int best_delta = 0;
@@ -117,7 +126,7 @@ private:
         }
 
         /* 入力バッファに十分なサンプルがあるか確認 */
-        if (read_pos + frame_size_ > available) {
+        if (read_pos + wsola_frame_size_ > available) {
             /* 入力終了が通知されていなければ、データ待ち */
             if (!input_ended_) {
                 return false;
@@ -142,7 +151,8 @@ private:
         } else {
             /* 通常読み取り：入力バッファから1フレーム分を非消費的に取得 */
             for (int ch = 0; ch < channel_count_; ++ch) {
-                input_ring_buffer_.peek(ch, temp_ptrs_[ch], 0, read_pos, frame_size_);
+                input_ring_buffer_.peek(
+                    ch, temp_ptrs_[ch], 0, read_pos, wsola_frame_size_);
             }
         }
 
@@ -165,7 +175,8 @@ private:
             has_prev_frame_ = true; /* 前フレーム保持フラグをセット */
         } else {
             /* 2フレーム目以降：前フレーム末尾と現フレーム先頭をクロスフェード */
-            int prev_overlap_pos = frame_size_ - synthesis_hop_; /* 前フレームのオーバーラップ開始位置 */
+            int prev_overlap_pos =
+                wsola_frame_size_ - synthesis_hop_; /* 前フレームのオーバーラップ開始位置 */
             for (int ch = 0; ch < channel_count_; ++ch) {
                 for (int i = 0; i < synthesis_hop_; ++i) {
                     float prev_sample = prev_frame_[ch][prev_overlap_pos + i]; /* 前フレームの重複部分 */
@@ -212,12 +223,12 @@ private:
     void compact() {
         /* 安全に破棄できるサンプル数を計算（読み取り位置 - フレームサイズ - 探索範囲分の余裕） */
         int safe_discard = static_cast<int>(std::floor(read_position_))
-                         - frame_size_ - search_range_;
+                         - wsola_frame_size_ - search_range_;
         if (safe_discard <= 0) {
             /* 破棄不可：入力終了かつバッファ空の場合、読み取り位置を制限 */
             if (input_ended_ && input_ring_buffer_.buffered() == 0
-                && read_position_ > static_cast<double>(frame_size_)) {
-                read_position_ = static_cast<double>(frame_size_);
+                && read_position_ > static_cast<double>(wsola_frame_size_)) {
+                read_position_ = static_cast<double>(wsola_frame_size_);
             }
             return;
         }
@@ -230,8 +241,8 @@ private:
 
         /* 入力終了かつバッファ空の場合、読み取り位置がフレームサイズを超えないよう制限 */
         if (input_ended_ && input_ring_buffer_.buffered() == 0
-            && read_position_ > static_cast<double>(frame_size_)) {
-            read_position_ = static_cast<double>(frame_size_);
+            && read_position_ > static_cast<double>(wsola_frame_size_)) {
+            read_position_ = static_cast<double>(wsola_frame_size_);
         }
     }
 };

@@ -24,7 +24,7 @@ public:
         channel_count_ = channel_count;
         frame_size_ = sampling_rate_ * FRAME_MS / 1000;
 
-        int capacity = frame_size_ * 6;
+        int capacity = frame_size_ * 10;
         input_ring_buffer_.init(channel_count_, capacity);
         output_ring_buffer_.init(channel_count_, capacity);
 
@@ -53,6 +53,12 @@ public:
 
     float getRatio() const { return time_stretch_ratio_; }
 
+    void setPhaseControl(float control) {
+        phase_control_ = std::clamp(control, 0.0f, 1.0f);
+    }
+
+    float getPhaseControl() const { return phase_control_; }
+
     int getNumNeededSamples(int output_sample_count) const {
         return static_cast<int>(
             std::ceil(output_sample_count * static_cast<double>(time_stretch_ratio_)));
@@ -60,6 +66,35 @@ public:
 
     int process(const float* const* input, int input_sample_count, bool input_ended,
                 float** output, int output_sample_count) {
+        const bool passthrough = (time_stretch_ratio_ == 1.0f);
+        if (passthrough) {
+            // Keep passthrough bit-perfect and avoid stale buffered audio when
+            // ratio toggles between 1.0 and stretched modes.
+            if (!passthrough_active_) {
+                reset();
+                passthrough_active_ = true;
+            }
+
+            const int to_copy = std::min(input_sample_count, output_sample_count);
+            for (int ch = 0; ch < channel_count_; ++ch) {
+                if (to_copy > 0) {
+                    std::memcpy(output[ch], input[ch], to_copy * sizeof(float));
+                }
+                if (to_copy < output_sample_count) {
+                    std::memset(output[ch] + to_copy, 0,
+                                (output_sample_count - to_copy) * sizeof(float));
+                }
+            }
+
+            input_ended_ = input_ended;
+            return to_copy;
+        }
+
+        if (passthrough_active_) {
+            reset();
+            passthrough_active_ = false;
+        }
+
         // Push input into input ring buffer
         if (input_sample_count > 0) {
             input_ring_buffer_.write(input, 0, input_sample_count);
@@ -140,7 +175,9 @@ protected:
     int channel_count_ = 2;
     int frame_size_ = 0;
     float time_stretch_ratio_ = 1.0f;
+    float phase_control_ = 0.0f;
     bool input_ended_ = false;
+    bool passthrough_active_ = false;
 
     MultiChannelRingBuffer input_ring_buffer_;
     MultiChannelRingBuffer output_ring_buffer_;

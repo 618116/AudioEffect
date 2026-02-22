@@ -1,11 +1,8 @@
-// wsola-processor.js — AudioWorklet processor for WSOLA time stretching
+// wsola-processor.js - AudioWorklet processor for runtime-selectable time stretching
 // Loaded as a blob URL combined with wsola.js (Emscripten WASM module)
 
 const BLOCK_SIZE = 128; // AudioWorklet render quantum
 const MAX_INPUT = 2048; // Max input samples per process call
-const MAX_DRAIN_BLOCKS = 64;
-const SILENT_BLOCKS_TO_END = 3;
-const SILENCE_EPS = 1e-5;
 
 class WSOLAProcessor extends AudioWorkletProcessor {
   constructor(options) {
@@ -19,21 +16,20 @@ class WSOLAProcessor extends AudioWorkletProcessor {
     this.readPos = 0;
     this.totalSamples = 0;
     this.numChannels = 2;
+    this.algorithm = 0; // 0 = WSOLA, 1 = Phase Vocoder
 
     // WASM heap pointers
-    this.inPtrs = 0;  // float** for input
+    this.inPtrs = 0; // float** for input
     this.outPtrs = 0; // float** for output
-    this.inBufs = [];  // float* per channel
+    this.inBufs = []; // float* per channel
     this.outBufs = []; // float* per channel
 
     this.progressCounter = 0;
-    this.draining = false;
-    this.drainBlocks = 0;
-    this.silentDrainBlocks = 0;
 
     this.port.onmessage = (e) => this.onMessage(e.data);
 
     const opts = options.processorOptions || {};
+    this.algorithm = opts.algorithm === 1 ? 1 : 0;
     this.initWasm(opts.sampleRate || sampleRate, opts.channels || 2);
   }
 
@@ -43,10 +39,11 @@ class WSOLAProcessor extends AudioWorkletProcessor {
       const mod = await Module();
       this.wasm = mod;
       this.numChannels = ch;
+      if (mod._ts_setAlgorithm) mod._ts_setAlgorithm(this.algorithm);
       mod._ts_init(sr, ch);
       this.allocBuffers(ch);
       this.ready = true;
-      this.port.postMessage({ type: 'ready' });
+      this.port.postMessage({ type: 'ready', algorithm: this.algorithm });
     } catch (e) {
       this.port.postMessage({ type: 'error', message: String(e) });
     }
@@ -68,31 +65,12 @@ class WSOLAProcessor extends AudioWorkletProcessor {
     }
   }
 
-  resetDrainState() {
-    this.draining = false;
-    this.drainBlocks = 0;
-    this.silentDrainBlocks = 0;
-  }
-
-  getBlockPeak(output) {
-    let peak = 0;
-    for (let c = 0; c < output.length; c++) {
-      const channel = output[c];
-      for (let i = 0; i < channel.length; i++) {
-        const v = Math.abs(channel[i]);
-        if (v > peak) peak = v;
-      }
-    }
-    return peak;
-  }
-
   onMessage(data) {
     switch (data.type) {
       case 'audio':
         this.audioData = data.channelData;
         this.totalSamples = data.channelData[0].length;
         this.readPos = 0;
-        this.resetDrainState();
         if (this.wasm) this.wasm._ts_reset();
         break;
       case 'play':
@@ -100,13 +78,11 @@ class WSOLAProcessor extends AudioWorkletProcessor {
           this.readPos = 0;
           if (this.wasm) this.wasm._ts_reset();
         }
-        this.resetDrainState();
         this.playing = true;
         break;
       case 'stop':
         this.playing = false;
         this.readPos = 0;
-        this.resetDrainState();
         if (this.wasm) this.wasm._ts_reset();
         break;
       case 'pause':
@@ -115,9 +91,17 @@ class WSOLAProcessor extends AudioWorkletProcessor {
       case 'ratio':
         if (this.wasm) this.wasm._ts_setRatio(data.value);
         break;
+      case 'phase':
+        if (this.wasm) this.wasm._ts_setPhaseControl(data.value);
+        break;
+      case 'algorithm':
+        this.algorithm = data.value === 1 ? 1 : 0;
+        if (this.wasm && this.wasm._ts_setAlgorithm) {
+          this.wasm._ts_setAlgorithm(this.algorithm);
+        }
+        break;
       case 'seek':
         this.readPos = Math.max(0, Math.floor(data.position));
-        this.resetDrainState();
         if (this.wasm) this.wasm._ts_reset();
         break;
     }
@@ -135,52 +119,35 @@ class WSOLAProcessor extends AudioWorkletProcessor {
 
     const remaining = this.totalSamples - this.readPos;
     const avail = remaining > 0 ? Math.min(needed, remaining) : 0;
+    const eof = remaining <= 0 ? 1 : 0;
 
-    // Copy input to WASM heap
-    for (let c = 0; c < ch; c++) {
-      const dst = new Float32Array(M.HEAPF32.buffer, this.inBufs[c], needed);
-      if (avail >= needed) {
-        dst.set(this.audioData[c].subarray(this.readPos, this.readPos + needed));
-      } else if (avail > 0) {
+    // Copy only real input samples to WASM heap. EOF tail padding is handled in C++.
+    if (avail > 0) {
+      for (let c = 0; c < ch; c++) {
+        const dst = new Float32Array(M.HEAPF32.buffer, this.inBufs[c], avail);
         dst.set(this.audioData[c].subarray(this.readPos, this.readPos + avail));
-        dst.fill(0, avail);
-      } else {
-        dst.fill(0);
       }
     }
     this.readPos += avail;
 
-    // WSOLA process
-    M._ts_process(this.inPtrs, needed, this.outPtrs, BLOCK_SIZE);
+    // Process one render block in the currently selected algorithm.
+    const produced = M._ts_process(
+      this.inPtrs, avail, eof, this.outPtrs, BLOCK_SIZE);
 
     // Copy output from WASM heap
     for (let c = 0; c < ch; c++) {
       const src = new Float32Array(M.HEAPF32.buffer, this.outBufs[c], BLOCK_SIZE);
       if (c < output.length) output[c].set(src);
     }
-    // Mono source → duplicate to right channel
+    // Mono source: duplicate to right channel
     if (ch === 1 && output.length > 1) {
       output[1].set(output[0]);
     }
 
-    if (remaining <= 0 || this.draining) {
-      this.draining = true;
-      this.drainBlocks++;
-      const peak = this.getBlockPeak(output);
-      if (peak < SILENCE_EPS) {
-        this.silentDrainBlocks++;
-      } else {
-        this.silentDrainBlocks = 0;
-      }
-
-      if (this.silentDrainBlocks >= SILENT_BLOCKS_TO_END ||
-          this.drainBlocks >= MAX_DRAIN_BLOCKS) {
-        this.playing = false;
-        this.resetDrainState();
-        this.port.postMessage({ type: 'ended' });
-      }
-    } else {
-      this.resetDrainState();
+    if (eof === 1 && produced === 0) {
+      this.playing = false;
+      this.port.postMessage({ type: 'ended' });
+      return true;
     }
 
     // Report progress ~every 50ms (every 18 blocks at 48kHz)

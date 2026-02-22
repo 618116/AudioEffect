@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WSOLA Time Stretch Demo</title>
+  <title>Time Stretch Demo (WSOLA / Phase Vocoder)</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -23,59 +23,110 @@
       padding: 24px;
       margin-bottom: 16px;
     }
-    /* source select */
+    .row-title {
+      font-size: 13px;
+      color: #9ba3c8;
+      margin-bottom: 8px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .mode-select,
     .source-select {
-      display: flex; gap: 18px; justify-content: center;
-      padding: 12px 0;
+      display: flex;
+      gap: 18px;
+      justify-content: center;
+      padding: 10px 0;
+      flex-wrap: wrap;
     }
+    .mode-select { padding-top: 2px; }
+    .source-select { padding-top: 4px; }
+    .mode-select label,
     .source-select label {
-      cursor: pointer; font-size: 14px;
-      display: flex; align-items: center; gap: 5px;
+      cursor: pointer;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 5px;
     }
+    .mode-select input[type=radio],
     .source-select input[type=radio] { accent-color: #6c63ff; }
     .file-info { margin-top: 10px; font-size: 13px; color: #888; text-align: center; }
-    /* slider */
     .slider-group { margin-bottom: 20px; }
     .slider-label {
-      display: flex; justify-content: space-between;
-      margin-bottom: 6px; font-size: 14px;
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 6px;
+      font-size: 14px;
     }
     .slider-value { color: #6c63ff; font-weight: 600; }
     input[type=range] { width: 100%; accent-color: #6c63ff; }
-    /* buttons */
+    .toggle-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      font-size: 14px;
+    }
+    .toggle-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    input[type=checkbox] {
+      width: 18px;
+      height: 18px;
+      accent-color: #6c63ff;
+    }
     .controls { display: flex; gap: 10px; justify-content: center; }
     button {
-      background: #6c63ff; border: none; color: #fff;
-      padding: 9px 22px; border-radius: 8px; font-size: 15px;
-      cursor: pointer; transition: background .15s;
+      background: #6c63ff;
+      border: none;
+      color: #fff;
+      padding: 9px 22px;
+      border-radius: 8px;
+      font-size: 15px;
+      cursor: pointer;
+      transition: background .15s;
     }
     button:hover:not(:disabled) { background: #5a52d5; }
     button:disabled { background: #3a3a5a; color: #666; cursor: default; }
     button.stop { background: #e74c3c; }
     button.stop:hover:not(:disabled) { background: #c0392b; }
-    /* progress */
     .progress-bar {
-      width: 100%; height: 6px; background: #2a2a4a;
-      border-radius: 3px; overflow: hidden; margin-top: 18px;
+      width: 100%;
+      height: 6px;
+      background: #2a2a4a;
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 18px;
       cursor: pointer;
     }
     .progress-fill {
-      height: 100%; background: #6c63ff; width: 0%;
+      height: 100%;
+      background: #6c63ff;
+      width: 0%;
       transition: width .08s linear;
     }
     .time { text-align: center; margin-top: 6px; font-size: 13px; color: #888; }
-    .status { text-align: center; margin-top: 10px; font-size: 12px; color: #555; }
+    .status { text-align: center; margin-top: 10px; font-size: 12px; color: #8f95b4; }
   </style>
 </head>
 <body>
 <div class="container">
-  <h1>WSOLA Time Stretch</h1>
+  <h1>Time Stretch (WSOLA / Phase Vocoder)</h1>
 
   <div class="card">
+    <div class="row-title">Algorithm</div>
+    <div class="mode-select">
+      <label><input type="radio" name="algorithm" value="0" checked> WSOLA</label>
+      <label><input type="radio" name="algorithm" value="1"> Phase Vocoder</label>
+    </div>
+
+    <div class="row-title">Source</div>
     <div class="source-select">
       <label><input type="radio" name="source" value="data/music.wav" checked> music.wav</label>
       <label><input type="radio" name="source" value="data/voice.wav"> voice.wav</label>
-      <label><input type="radio" name="source" value="data/se.wav"> se.wav</label>
+      <label><input type="radio" name="source" value="data/se.mp3"> se.mp3</label>
     </div>
     <div class="file-info" id="info"></div>
   </div>
@@ -87,6 +138,14 @@
         <span class="slider-value" id="ratioVal">1.0x</span>
       </div>
       <input type="range" id="ratio" min="0.5" max="2.0" step="0.1" value="1.0">
+    </div>
+
+    <div class="toggle-row">
+      <span>Phase Control</span>
+      <div class="toggle-controls">
+        <span class="slider-value" id="phaseVal">0.0</span>
+        <input type="checkbox" id="phaseToggle">
+      </div>
     </div>
 
     <div class="controls">
@@ -104,44 +163,98 @@
 </div>
 
 <script>
-  // ── state ──────────────────────────────────────────────────
-  let ctx = null, node = null, playing = false;
-  let totalSamples = 0, curPos = 0, sr = 48000;
+  let ctx = null;
+  let node = null;
+  let playing = false;
+  let totalSamples = 0;
+  let curPos = 0;
+  let sr = 48000;
 
-  // ── DOM ────────────────────────────────────────────────────
   const $ = (id) => document.getElementById(id);
-  const info     = $('info'),   status  = $('status');
-  const ratioIn  = $('ratio'),  ratioVal = $('ratioVal');
-  const playBtn  = $('playBtn'), pauseBtn = $('pauseBtn'), stopBtn = $('stopBtn');
-  const bar      = $('bar'),    fill    = $('fill'),   timeEl = $('time');
+  const info = $('info');
+  const status = $('status');
+  const ratioIn = $('ratio');
+  const ratioVal = $('ratioVal');
+  const phaseToggle = $('phaseToggle');
+  const phaseVal = $('phaseVal');
+  const playBtn = $('playBtn');
+  const pauseBtn = $('pauseBtn');
+  const stopBtn = $('stopBtn');
+  const bar = $('bar');
+  const fill = $('fill');
+  const timeEl = $('time');
 
-  // ── helpers ────────────────────────────────────────────────
+  const sourceRadios = document.querySelectorAll('input[name="source"]');
+  const algorithmRadios = document.querySelectorAll('input[name="algorithm"]');
+
   const fmt = (s) => {
     const m = Math.floor(s / 60);
     return m + ':' + String(Math.floor(s % 60)).padStart(2, '0');
   };
+
+  const algorithmLabel = (mode) => (mode === 1 ? 'Phase Vocoder' : 'WSOLA');
+
+  const getSelectedAlgorithm = () => {
+    const selected = document.querySelector('input[name="algorithm"]:checked');
+    return selected && selected.value === '1' ? 1 : 0;
+  };
+
   function updateUI() {
-    const pct = totalSamples ? curPos / totalSamples * 100 : 0;
+    const pct = totalSamples ? (curPos / totalSamples) * 100 : 0;
     fill.style.width = Math.min(pct, 100) + '%';
     timeEl.textContent = fmt(curPos / sr) + ' / ' + fmt(totalSamples / sr);
-    playBtn.disabled  = !totalSamples || playing;
+    playBtn.disabled = !totalSamples || playing;
     pauseBtn.disabled = !playing;
-    stopBtn.disabled  = !totalSamples;
+    stopBtn.disabled = !totalSamples;
   }
 
-  // ── source select ─────────────────────────────────────────
-  const radios = document.querySelectorAll('input[name="source"]');
-  radios.forEach(r => r.addEventListener('change', () => loadFromUrl(r.value)));
+  function send(type, extra) {
+    if (node) {
+      node.port.postMessage(Object.assign({ type }, extra));
+    }
+  }
 
-  // ── transport ──────────────────────────────────────────────
-  playBtn.addEventListener('click', () => { send('play'); ctx.resume(); playing = true; updateUI(); });
-  pauseBtn.addEventListener('click', () => { send('pause'); playing = false; updateUI(); });
-  stopBtn.addEventListener('click', () => { send('stop'); playing = false; curPos = 0; updateUI(); });
+  function applySelectedAlgorithm() {
+    const mode = getSelectedAlgorithm();
+    send('algorithm', { value: mode });
+    if (node) {
+      status.textContent = 'Ready (' + algorithmLabel(mode) + ')';
+    }
+  }
+
+  sourceRadios.forEach((r) => r.addEventListener('change', () => loadFromUrl(r.value)));
+  algorithmRadios.forEach((r) => r.addEventListener('change', applySelectedAlgorithm));
+
+  playBtn.addEventListener('click', () => {
+    send('play');
+    ctx.resume();
+    playing = true;
+    updateUI();
+  });
+
+  pauseBtn.addEventListener('click', () => {
+    send('pause');
+    playing = false;
+    updateUI();
+  });
+
+  stopBtn.addEventListener('click', () => {
+    send('stop');
+    playing = false;
+    curPos = 0;
+    updateUI();
+  });
 
   ratioIn.addEventListener('input', () => {
     const v = parseFloat(ratioIn.value);
     ratioVal.textContent = v.toFixed(1) + 'x';
     send('ratio', { value: v });
+  });
+
+  phaseToggle.addEventListener('change', () => {
+    const v = phaseToggle.checked ? 1.0 : 0.0;
+    phaseVal.textContent = v.toFixed(1);
+    send('phase', { value: v });
   });
 
   bar.addEventListener('click', (e) => {
@@ -152,53 +265,70 @@
     updateUI();
   });
 
-  // ── worklet communication ──────────────────────────────────
-  function send(type, extra) {
-    if (node) node.port.postMessage(Object.assign({ type }, extra));
-  }
-
   function onWorkletMsg(e) {
     const d = e.data;
-    if (d.type === 'progress') { curPos = d.position; updateUI(); }
-    else if (d.type === 'ended') { playing = false; curPos = 0; updateUI(); }
-    else if (d.type === 'ready') { status.textContent = 'WASM ready'; }
-    else if (d.type === 'error') { status.textContent = 'Error: ' + d.message; }
+    if (d.type === 'progress') {
+      curPos = d.position;
+      updateUI();
+      return;
+    }
+    if (d.type === 'ended') {
+      playing = false;
+      curPos = 0;
+      updateUI();
+      return;
+    }
+    if (d.type === 'ready') {
+      const mode = typeof d.algorithm === 'number' ? d.algorithm : getSelectedAlgorithm();
+      status.textContent = 'Ready (' + algorithmLabel(mode) + ')';
+      return;
+    }
+    if (d.type === 'error') {
+      status.textContent = 'Error: ' + d.message;
+    }
   }
 
-  // ── init worklet on page load ────────────────────────────
-  let initReady = null; // resolves when worklet is ready
-
   (async function init() {
-    status.textContent = 'Loading WASM\u2026';
+    status.textContent = 'Loading WASM...';
     try {
       ctx = new AudioContext();
       sr = ctx.sampleRate;
 
       await ctx.audioWorklet.addModule('../build/wsola-worklet.js');
 
+      const mode = getSelectedAlgorithm();
       node = new AudioWorkletNode(ctx, 'wsola-processor', {
         numberOfInputs: 0,
         numberOfOutputs: 1,
         outputChannelCount: [2],
-        processorOptions: { sampleRate: ctx.sampleRate, channels: 2 },
+        processorOptions: {
+          sampleRate: ctx.sampleRate,
+          channels: 2,
+          algorithm: mode,
+        },
       });
       node.connect(ctx.destination);
       node.port.onmessage = onWorkletMsg;
 
+      send('algorithm', { value: mode });
       send('ratio', { value: parseFloat(ratioIn.value) });
+      send('phase', { value: phaseToggle.checked ? 1.0 : 0.0 });
 
-      // auto-load the selected source
       const selected = document.querySelector('input[name="source"]:checked');
-      if (selected) loadFromUrl(selected.value);
+      if (selected) {
+        loadFromUrl(selected.value);
+      }
     } catch (e) {
       status.textContent = 'Init failed: ' + e.message;
     }
   })();
 
-  // ── load from URL ─────────────────────────────────────────
   async function loadFromUrl(url) {
-    if (!node) { info.textContent = 'Worklet not ready yet'; return; }
-    info.textContent = 'Loading\u2026';
+    if (!node) {
+      info.textContent = 'Worklet not ready yet';
+      return;
+    }
+    info.textContent = 'Loading...';
     try {
       const resp = await fetch(url);
       if (!resp.ok) throw new Error('File not found: ' + url);
@@ -207,7 +337,10 @@
       totalSamples = buf.length;
       curPos = 0;
 
-      if (playing) { send('stop'); playing = false; }
+      if (playing) {
+        send('stop');
+        playing = false;
+      }
 
       const ch0 = new Float32Array(buf.getChannelData(0));
       const ch1 = buf.numberOfChannels > 1
