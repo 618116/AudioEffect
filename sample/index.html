@@ -23,18 +23,17 @@
       padding: 24px;
       margin-bottom: 16px;
     }
-    /* file drop */
-    .file-drop {
-      border: 2px dashed #4a4a6a;
-      border-radius: 8px;
-      padding: 36px 16px;
-      text-align: center;
-      cursor: pointer;
-      transition: border-color .2s;
+    /* source select */
+    .source-select {
+      display: flex; gap: 18px; justify-content: center;
+      padding: 12px 0;
     }
-    .file-drop:hover, .file-drop.over { border-color: #6c63ff; }
-    .file-drop input { display: none; }
-    .file-info { margin-top: 10px; font-size: 13px; color: #888; }
+    .source-select label {
+      cursor: pointer; font-size: 14px;
+      display: flex; align-items: center; gap: 5px;
+    }
+    .source-select input[type=radio] { accent-color: #6c63ff; }
+    .file-info { margin-top: 10px; font-size: 13px; color: #888; text-align: center; }
     /* slider */
     .slider-group { margin-bottom: 20px; }
     .slider-label {
@@ -73,11 +72,12 @@
   <h1>WSOLA Time Stretch</h1>
 
   <div class="card">
-    <div class="file-drop" id="drop">
-      <div>Drop an audio file here or click to browse</div>
-      <input type="file" id="file" accept="audio/*">
-      <div class="file-info" id="info"></div>
+    <div class="source-select">
+      <label><input type="radio" name="source" value="data/music.wav" checked> music.wav</label>
+      <label><input type="radio" name="source" value="data/voice.wav"> voice.wav</label>
+      <label><input type="radio" name="source" value="data/se.wav"> se.wav</label>
     </div>
+    <div class="file-info" id="info"></div>
   </div>
 
   <div class="card">
@@ -110,7 +110,6 @@
 
   // ── DOM ────────────────────────────────────────────────────
   const $ = (id) => document.getElementById(id);
-  const drop     = $('drop'),   fileIn  = $('file');
   const info     = $('info'),   status  = $('status');
   const ratioIn  = $('ratio'),  ratioVal = $('ratioVal');
   const playBtn  = $('playBtn'), pauseBtn = $('pauseBtn'), stopBtn = $('stopBtn');
@@ -130,12 +129,9 @@
     stopBtn.disabled  = !totalSamples;
   }
 
-  // ── file input ─────────────────────────────────────────────
-  drop.addEventListener('click', () => fileIn.click());
-  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
-  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
-  drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files.length) load(e.dataTransfer.files[0]); });
-  fileIn.addEventListener('change', () => { if (fileIn.files.length) load(fileIn.files[0]); });
+  // ── source select ─────────────────────────────────────────
+  const radios = document.querySelectorAll('input[name="source"]');
+  radios.forEach(r => r.addEventListener('change', () => loadFromUrl(r.value)));
 
   // ── transport ──────────────────────────────────────────────
   playBtn.addEventListener('click', () => { send('play'); ctx.resume(); playing = true; updateUI(); });
@@ -190,24 +186,29 @@
       node.port.onmessage = onWorkletMsg;
 
       send('ratio', { value: parseFloat(ratioIn.value) });
+
+      // auto-load the selected source
+      const selected = document.querySelector('input[name="source"]:checked');
+      if (selected) loadFromUrl(selected.value);
     } catch (e) {
       status.textContent = 'Init failed: ' + e.message;
     }
   })();
 
-  // ── load file ──────────────────────────────────────────────
-  async function load(file) {
+  // ── load from URL ─────────────────────────────────────────
+  async function loadFromUrl(url) {
     if (!node) { info.textContent = 'Worklet not ready yet'; return; }
     info.textContent = 'Loading\u2026';
     try {
-      const buf = await ctx.decodeAudioData(await file.arrayBuffer());
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error('File not found: ' + url);
+      const buf = await ctx.decodeAudioData(await resp.arrayBuffer());
 
       totalSamples = buf.length;
       curPos = 0;
 
       if (playing) { send('stop'); playing = false; }
 
-      // Always send stereo (duplicate mono if needed)
       const ch0 = new Float32Array(buf.getChannelData(0));
       const ch1 = buf.numberOfChannels > 1
         ? new Float32Array(buf.getChannelData(1))
@@ -215,8 +216,9 @@
 
       node.port.postMessage({ type: 'audio', channelData: [ch0, ch1], channels: 2 });
 
+      const name = url.split('/').pop();
       info.textContent =
-        file.name + '  (' + fmt(buf.length / sr) + ', ' +
+        name + '  (' + fmt(buf.length / sr) + ', ' +
         buf.numberOfChannels + 'ch, ' + sr + ' Hz)';
       updateUI();
     } catch (e) {
