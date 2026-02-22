@@ -61,6 +61,23 @@ public:
         if (write_ >= capacity_) write_ = 0;
     }
 
+    // Read from an arbitrary position relative to read pointer, without consuming.
+    void read(float** output, int output_offset, int position, int count) const {
+        for (int channel_index = 0; channel_index < channel_count_; ++channel_index) {
+            int pos = (read_ + position) % capacity_;
+            for (int i = 0; i < count; ++i) {
+                output[channel_index][output_offset + i] = data_[channel_index][pos];
+                pos++;
+                if (pos >= capacity_) pos = 0;
+            }
+        }
+    }
+
+    // Advance read pointer without copying (discard samples).
+    void discard(int count) {
+        read_ = (read_ + count) % capacity_;
+    }
+
     void drain(float** output, int output_offset, int count) {
         for (int channel_index = 0; channel_index < channel_count_; ++channel_index) {
             int read_pos = read_;
