@@ -1,280 +1,344 @@
 #pragma once
 // ============================================================================
-// wsola.h â€” Minimal real-time WSOLA time-stretcher
+// wsola.h - Minimal real-time WSOLA time-stretcher
 //
 // API:
-//   init(sampleRate, channels)          â€” allocate, configure
-//   reset()                             â€” clear state (on seek/discontinuity)
-//   setRatio(ratio)                     â€” 0.5â€“2.0, 1.0 = no stretch
-//   getNumNeededSamples(outputSamples)  â€” how many input samples to provide
-//   process(in, inLen, out, outLen)     â€” deinterleaved float**
+//   init(sample_rate, channel_count)          - allocate, configure
+//   reset()                             - clear state (on seek/discontinuity)
+//   setRatio(ratio)                     - 0.5-2.0, 1.0 = no stretch
+//   getNumNeededSamples(output_sample_count)  - how many input samples to provide
+//   process(in, inLen, out, outLen)     - deinterleaved float**
 //
 // ============================================================================
 
+#include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <vector>
-#include <algorithm>
-#include <cassert>
+
+#include "ring_buffer.h"
 
 struct WSOLAConfig {
-    int overlapLen = 128;   // Crossfade length (samples). Determines lowest
-                            // frequency handled cleanly: ~sampleRate/overlapLen Hz.
-                            // 128 @ 48kHz â‰ˆ 375Hz+. Use 256 for 187Hz+, 512 for 94Hz+.
+    int overlapLength = 128;  // Crossfade length (samples). Determines lowest
+                              // frequency handled cleanly: ~sample_rate/overlapLength Hz.
+                              // 128 @ 48kHz ~= 375Hz+. Use 256 for 187Hz+, 512 for 94Hz+.
 
-    int seekWin    = 128;   // Cross-correlation search range (Â±samples).
-                            // Larger = better match, more CPU. 128 is good up to 1.5Ã—.
+    int seekWindow = 128;     // Cross-correlation search range (+/- samples).
+                              // Larger = better match, more CPU. 128 is good up to 1.5x.
 
-    int seqLen     = 256;   // Samples copied between splice points.
-                            // Must be >= overlapLen. 256â€“512 is a good range.
+    int sequenceLength = 256; // Samples copied between splice points.
+                              // Must be >= overlapLength. 256-512 is a good range.
 };
 
 class WSOLA {
 public:
     using Config = WSOLAConfig;
 
-    void init(int sampleRate, int channels, Config config = Config()) {
-        sr_       = sampleRate;
-        ch_       = channels;
-        cfg_      = config;
+    void init(int sample_rate, int channel_count, Config configuration = Config()) {
+        sampling_rate_ = sample_rate;
+        channel_count_ = channel_count;
+        configuration_ = configuration;
 
-        assert(cfg_.seqLen >= cfg_.overlapLen);
+        assert(configuration_.sequenceLength >= configuration_.overlapLength);
 
         // History buffer per channel: enough to hold input for correlation search.
-        histCap_ = (cfg_.seqLen + cfg_.seekWin * 2 + cfg_.overlapLen) * 4;
-        hist_.resize(ch_);
-        overlap_.resize(ch_);
-        for (int c = 0; c < ch_; ++c) {
-            hist_[c].resize(histCap_, 0.0f);
-            overlap_[c].resize(cfg_.overlapLen, 0.0f);
+        history_capacity_ = (configuration_.sequenceLength
+                          + configuration_.seekWindow * 2
+                          + configuration_.overlapLength) * 4;
+        history_.resize(channel_count_);
+        overlap_buffer_.resize(channel_count_);
+        for (int channel_index = 0; channel_index < channel_count_; ++channel_index) {
+            history_[channel_index].resize(history_capacity_, 0.0f);
+            overlap_buffer_[channel_index].resize(configuration_.overlapLength, 0.0f);
         }
+
+        // Output ring buffer: hold several full sequences worth of output.
+        output_ring_buffer_.init(channel_count_, configuration_.sequenceLength * 4);
 
         reset();
     }
 
     void reset() {
-        histLen_    = 0;
-        readPos_    = 0.0;
-        hasOverlap_ = false;
-        for (int c = 0; c < ch_; ++c) {
-            std::fill(hist_[c].begin(), hist_[c].end(), 0.0f);
-            std::fill(overlap_[c].begin(), overlap_[c].end(), 0.0f);
+        history_length_ = 0;
+        read_position_ = 0.0;
+        has_overlap_tail_ = false;
+        for (int channel_index = 0; channel_index < channel_count_; ++channel_index) {
+            std::fill(history_[channel_index].begin(), history_[channel_index].end(), 0.0f);
+            std::fill(overlap_buffer_[channel_index].begin(), overlap_buffer_[channel_index].end(), 0.0f);
         }
+        output_ring_buffer_.reset();
     }
 
     void setRatio(float ratio) {
-        ratio_ = std::clamp(ratio, 0.5f, 2.0f);
+        float clamped_ratio = std::clamp(ratio, 0.5f, 2.0f);
+        time_stretch_ratio_ = std::round(clamped_ratio * 10.0f) / 10.0f;
     }
 
-    float getRatio() const { return ratio_; }
+    float getRatio() const { return time_stretch_ratio_; }
 
     // How many input samples you should provide for the given output length.
-    int getNumNeededSamples(int outputSamples) const {
-        if (std::abs(ratio_ - 1.0f) < 0.005f) return outputSamples;
+    int getNumNeededSamples(int output_sample_count) const {
+        if (std::abs(time_stretch_ratio_ - 1.0f) < 0.005f) {
+            return output_sample_count;
+        }
+
+        // Account for samples already buffered in the output ring buffer.
+        int buffered_output = output_ring_buffer_.buffered();
+        int still_need_output = std::max(0, output_sample_count - buffered_output);
+        if (still_need_output == 0) {
+            return 0;
+        }
+
         // We consume input at ratio speed. Add margin for seek + sequence lookahead.
-        int totalAhead = (int)std::ceil((double)outputSamples * (double)ratio_)
-                       + cfg_.seqLen + cfg_.seekWin;
-        int available  = histLen_ - (int)readPos_;
-        return std::max(0, totalAhead - available);
+        int total_ahead = static_cast<int>(std::ceil(static_cast<double>(still_need_output)
+                                                   * static_cast<double>(time_stretch_ratio_)))
+                       + configuration_.sequenceLength
+                       + configuration_.seekWindow;
+        int available_input_samples = history_length_ - static_cast<int>(read_position_);
+        return std::max(0, total_ahead - available_input_samples);
     }
 
     // Process: read from input, write to output.
-    // input[ch][0..inputSamples-1], output[ch][0..outputSamples-1]
-    void process(const float* const* input, int inputSamples,
-                 float**             output, int outputSamples)
-    {
-        float r = ratio_;
+    // input[ch][0..input_sample_count-1], output[ch][0..output_sample_count-1]
+    void process(const float* const* input, int input_sample_count,
+                 float** output, int output_sample_count) {
+        float stretch_ratio = time_stretch_ratio_;
 
         // --- Fast path: passthrough ---
-        if (std::abs(r - 1.0f) < 0.005f && !hasOverlap_) {
-            int n = std::min(inputSamples, outputSamples);
-            for (int c = 0; c < ch_; ++c) {
-                std::memcpy(output[c], input[c], n * sizeof(float));
-                if (outputSamples > n)
-                    std::memset(output[c] + n, 0, (outputSamples - n) * sizeof(float));
+        if (std::abs(stretch_ratio - 1.0f) < 0.005f && !has_overlap_tail_ && output_ring_buffer_.buffered() == 0) {
+            int passthrough_sample_count = std::min(input_sample_count, output_sample_count);
+            for (int channel_index = 0; channel_index < channel_count_; ++channel_index) {
+                std::memcpy(output[channel_index], input[channel_index], passthrough_sample_count * sizeof(float));
+                if (output_sample_count > passthrough_sample_count) {
+                    std::memset(output[channel_index] + passthrough_sample_count,
+                                0,
+                                (output_sample_count - passthrough_sample_count) * sizeof(float));
+                }
             }
             return;
         }
 
         // --- Push input into history ---
-        pushHistory(input, inputSamples);
+        push_history(input, input_sample_count);
 
-        // --- Produce output via WSOLA ---
-        int written = 0;
-
-        while (written < outputSamples) {
-            int nominalPos = (int)readPos_;
-
-            // Check we have enough history ahead
-            int needed = nominalPos + cfg_.seqLen + cfg_.seekWin;
-            if (needed > histLen_) {
-                // Starved â€” zero-fill remainder
-                for (int c = 0; c < ch_; ++c)
-                    std::memset(output[c] + written, 0,
-                                (outputSamples - written) * sizeof(float));
-                break;
+        // --- Produce full WSOLA sequences into the output ring buffer ---
+        while (output_ring_buffer_.buffered() < output_sample_count) {
+            if (!produce_one_sequence(stretch_ratio)) {
+                break; // not enough history data
             }
+        }
 
-            // Find best splice position
-            int bestOffset = hasOverlap_ ? findBestOverlap(nominalPos) : 0;
-            int splicePos  = nominalPos + bestOffset;
+        // --- Drain output ring buffer to caller ---
+        int available_output = output_ring_buffer_.buffered();
+        int to_drain = std::min(available_output, output_sample_count);
+        output_ring_buffer_.drain(output, 0, to_drain);
 
-            // Body length = sequence minus crossfade region
-            int bodyLen = cfg_.seqLen - cfg_.overlapLen;
-
-            if (hasOverlap_) {
-                // Crossfade overlap tail into new sequence
-                int fadeLen = std::min(cfg_.overlapLen, outputSamples - written);
-                crossfade(output, written, splicePos, fadeLen);
-                written += fadeLen;
-
-                // Copy body (non-crossfaded portion)
-                int toWrite = std::min(bodyLen, outputSamples - written);
-                if (toWrite > 0) {
-                    copyFromHist(output, written, splicePos + cfg_.overlapLen, toWrite);
-                    written += toWrite;
-                }
-            } else {
-                // First sequence â€” no crossfade
-                int toWrite = std::min(cfg_.seqLen, outputSamples - written);
-                copyFromHist(output, written, splicePos, toWrite);
-                written += toWrite;
+        // Zero-fill any remainder if we ran out of data
+        if (to_drain < output_sample_count) {
+            for (int channel_index = 0; channel_index < channel_count_; ++channel_index) {
+                std::memset(output[channel_index] + to_drain,
+                            0,
+                            (output_sample_count - to_drain) * sizeof(float));
             }
-
-            // Save tail of this sequence for next crossfade
-            saveOverlap(splicePos + cfg_.seqLen - cfg_.overlapLen);
-
-            // Advance read position: consume input at ratio rate
-            readPos_ += (double)cfg_.seqLen * (double)r;
         }
 
         // --- Compact history: discard consumed samples ---
         compact();
     }
 
-    int latencySamples() const { return cfg_.overlapLen + cfg_.seekWin; }
-    float latencyMs()    const { return 1000.0f * latencySamples() / sr_; }
+    int latencySamples() const { return configuration_.overlapLength + configuration_.seekWindow; }
+    float latencyMs() const { return 1000.0f * latencySamples() / sampling_rate_; }
 
 private:
-    int   sr_  = 44100;
-    int   ch_  = 2;
-    float ratio_ = 1.0f;
-    Config cfg_;
+    int sampling_rate_ = 44100;
+    int channel_count_ = 2;
+    float time_stretch_ratio_ = 1.0f;
+    Config configuration_;
 
-    std::vector<std::vector<float>> hist_;     // [ch][sample] â€” input history
-    std::vector<std::vector<float>> overlap_;  // [ch][overlapLen] â€” crossfade tail
-    int    histCap_    = 0;
-    int    histLen_    = 0;
-    double readPos_    = 0.0;
-    bool   hasOverlap_ = false;
+    // Input history
+    std::vector<std::vector<float>> history_;        // [ch][sample]
+    std::vector<std::vector<float>> overlap_buffer_;  // [ch][overlapLength] crossfade tail
+    int history_capacity_ = 0;
+    int history_length_ = 0;
+    double read_position_ = 0.0;
+    bool has_overlap_tail_ = false;
 
-    // ------------------------------------------------------------------
-    void pushHistory(const float* const* input, int n) {
-        int space = histCap_ - histLen_;
-        int push  = std::min(n, space);
-        for (int c = 0; c < ch_; ++c)
-            std::memcpy(hist_[c].data() + histLen_, input[c], push * sizeof(float));
-        histLen_ += push;
+    // Output ring buffer: decouples WSOLA sequence size from caller's block size.
+    MultiChannelRingBuffer output_ring_buffer_;
+
+    // Produce one full WSOLA sequence into the output ring buffer.
+    // Returns false if not enough history data.
+    bool produce_one_sequence(float stretch_ratio) {
+        int nominal_position = static_cast<int>(read_position_);
+
+        // Check we have enough history ahead
+        int required_history_samples = nominal_position + configuration_.sequenceLength + configuration_.seekWindow;
+        if (required_history_samples > history_length_) {
+            return false;
+        }
+
+        // Check we have room in the output buffer
+        int sequence_output_length = has_overlap_tail_
+            ? configuration_.sequenceLength  // crossfade(overlapLen) + body(seqLen - overlapLen)
+            : configuration_.sequenceLength;
+        if (output_ring_buffer_.free() < sequence_output_length) {
+            return false;
+        }
+
+        // Find best splice position
+        int best_overlap_offset = has_overlap_tail_ ? find_best_overlap(nominal_position) : 0;
+        int splice_position = nominal_position + best_overlap_offset;
+
+        if (has_overlap_tail_) {
+            // Crossfade: blend overlap_buffer_ with history at splice_position
+            for (int i = 0; i < configuration_.overlapLength; ++i) {
+                float blend_factor = static_cast<float>(i)
+                                  / static_cast<float>(configuration_.overlapLength - 1);
+                for (int channel_index = 0; channel_index < channel_count_; ++channel_index) {
+                    float sample = overlap_buffer_[channel_index][i] * (1.0f - blend_factor)
+                                 + history_[channel_index][splice_position + i] * blend_factor;
+                    output_ring_buffer_.writeSample(channel_index, sample);
+                }
+                output_ring_buffer_.advanceWrite();
+            }
+
+            // Body (non-crossfaded portion)
+            int body_length = configuration_.sequenceLength - configuration_.overlapLength;
+            int body_start = splice_position + configuration_.overlapLength;
+            for (int i = 0; i < body_length; ++i) {
+                for (int channel_index = 0; channel_index < channel_count_; ++channel_index) {
+                    output_ring_buffer_.writeSample(channel_index, history_[channel_index][body_start + i]);
+                }
+                output_ring_buffer_.advanceWrite();
+            }
+        } else {
+            // First sequence - no crossfade
+            for (int i = 0; i < configuration_.sequenceLength; ++i) {
+                for (int channel_index = 0; channel_index < channel_count_; ++channel_index) {
+                    output_ring_buffer_.writeSample(channel_index, history_[channel_index][splice_position + i]);
+                }
+                output_ring_buffer_.advanceWrite();
+            }
+        }
+
+        // Save tail of this sequence for next crossfade
+        save_overlap(splice_position + configuration_.sequenceLength - configuration_.overlapLength);
+
+        // Advance read position: consume input at ratio rate
+        read_position_ += static_cast<double>(configuration_.sequenceLength)
+                      * static_cast<double>(stretch_ratio);
+
+        return true;
     }
 
-    // ------------------------------------------------------------------
+    void push_history(const float* const* input, int input_sample_count) {
+        int available_space = history_capacity_ - history_length_;
+        int samples_to_push = std::min(input_sample_count, available_space);
+        for (int channel_index = 0; channel_index < channel_count_; ++channel_index) {
+            std::memcpy(
+                history_[channel_index].data() + history_length_,
+                input[channel_index],
+                samples_to_push * sizeof(float));
+        }
+        history_length_ += samples_to_push;
+    }
+
     // Normalized cross-correlation search.
-    // Compare overlap_[] against history at positions around nominalPos.
-    // Returns offset from nominalPos.
-    // ------------------------------------------------------------------
-    int findBestOverlap(int nominalPos) {
-        int lo = std::max(0, nominalPos - cfg_.seekWin);
-        int hi = std::min(histLen_ - cfg_.overlapLen, nominalPos + cfg_.seekWin);
-        if (lo >= hi) return 0;
+    // Compare overlap_buffer_[] against history at positions around nominal_position.
+    // Returns offset from nominal_position.
+    int find_best_overlap(int nominal_position) {
+        int search_start = std::max(0, nominal_position - configuration_.seekWindow);
+        int search_end = std::min(
+            history_length_ - configuration_.overlapLength,
+            nominal_position + configuration_.seekWindow);
+        if (search_start >= search_end) {
+            return 0;
+        }
 
         // Energy of overlap tail (constant across search)
-        float energyA = 0.0f;
-        for (int c = 0; c < ch_; ++c)
-            for (int i = 0; i < cfg_.overlapLen; ++i)
-                energyA += overlap_[c][i] * overlap_[c][i];
-
-        // Initial candidate energy at position lo
-        float energyB = 0.0f;
-        for (int c = 0; c < ch_; ++c)
-            for (int i = 0; i < cfg_.overlapLen; ++i)
-                energyB += hist_[c][lo + i] * hist_[c][lo + i];
-
-        int   bestOff  = 0;
-        float bestCorr = -1e30f;
-
-        for (int pos = lo; pos < hi; ++pos) {
-            // Dot product across all channels
-            float corr = 0.0f;
-            for (int c = 0; c < ch_; ++c)
-                for (int i = 0; i < cfg_.overlapLen; ++i)
-                    corr += overlap_[c][i] * hist_[c][pos + i];
-
-            // Normalize
-            float denom = std::sqrt(energyA * energyB);
-            if (denom > 1e-8f) corr /= denom;
-
-            if (corr > bestCorr) {
-                bestCorr = corr;
-                bestOff  = pos - nominalPos;
+        float overlap_energy = 0.0f;
+        for (int channel_index = 0; channel_index < channel_count_; ++channel_index) {
+            for (int sample_index = 0; sample_index < configuration_.overlapLength; ++sample_index) {
+                overlap_energy += overlap_buffer_[channel_index][sample_index]
+                              * overlap_buffer_[channel_index][sample_index];
             }
+        }
 
-            // Slide energyB: remove leaving sample, add entering sample
-            if (pos + 1 < hi) {
-                for (int c = 0; c < ch_; ++c) {
-                    float out = hist_[c][pos];
-                    float in  = hist_[c][pos + cfg_.overlapLen];
-                    energyB += in * in - out * out;
+        // Initial candidate energy at position search_start
+        float candidate_energy = 0.0f;
+        for (int channel_index = 0; channel_index < channel_count_; ++channel_index) {
+            for (int sample_index = 0; sample_index < configuration_.overlapLength; ++sample_index) {
+                candidate_energy += history_[channel_index][search_start + sample_index]
+                                 * history_[channel_index][search_start + sample_index];
+            }
+        }
+
+        int best_offset = 0;
+        float best_correlation = -1e30f;
+
+        for (int candidate_position = search_start; candidate_position < search_end; ++candidate_position) {
+            float correlation = 0.0f;
+            for (int channel_index = 0; channel_index < channel_count_; ++channel_index) {
+                for (int sample_index = 0; sample_index < configuration_.overlapLength; ++sample_index) {
+                    correlation += overlap_buffer_[channel_index][sample_index]
+                                * history_[channel_index][candidate_position + sample_index];
                 }
-                energyB = std::max(0.0f, energyB);
+            }
+
+            float normalization = std::sqrt(overlap_energy * candidate_energy);
+            if (normalization > 1e-8f) {
+                correlation /= normalization;
+            }
+
+            if (correlation > best_correlation) {
+                best_correlation = correlation;
+                best_offset = candidate_position - nominal_position;
+            }
+
+            // Slide candidate_energy: remove leaving sample, add entering sample
+            if (candidate_position + 1 < search_end) {
+                for (int channel_index = 0; channel_index < channel_count_; ++channel_index) {
+                    float leaving_sample = history_[channel_index][candidate_position];
+                    float entering_sample = history_[channel_index][candidate_position + configuration_.overlapLength];
+                    candidate_energy += entering_sample * entering_sample
+                                    - leaving_sample * leaving_sample;
+                }
+                candidate_energy = std::max(0.0f, candidate_energy);
             }
         }
 
-        return bestOff;
+        return best_offset;
     }
 
-    // ------------------------------------------------------------------
-    // Crossfade overlap_[] with history at splicePos, write to output
-    // ------------------------------------------------------------------
-    void crossfade(float** output, int outPos, int histPos, int fadeLen) {
-        for (int i = 0; i < fadeLen; ++i) {
-            float t = (float)i / (float)(cfg_.overlapLen - 1);
-            for (int c = 0; c < ch_; ++c) {
-                output[c][outPos + i] = overlap_[c][i] * (1.0f - t)
-                                      + hist_[c][histPos + i] * t;
-            }
+    void save_overlap(int history_position) {
+        int clamped_position = std::clamp(history_position, 0, history_length_ - configuration_.overlapLength);
+        for (int channel_index = 0; channel_index < channel_count_; ++channel_index) {
+            std::memcpy(
+                overlap_buffer_[channel_index].data(),
+                history_[channel_index].data() + clamped_position,
+                configuration_.overlapLength * sizeof(float));
         }
+        has_overlap_tail_ = true;
     }
 
-    // ------------------------------------------------------------------
-    void copyFromHist(float** output, int outPos, int histPos, int n) {
-        int safe = std::min(n, histLen_ - histPos);
-        if (safe <= 0) return;
-        for (int c = 0; c < ch_; ++c)
-            std::memcpy(output[c] + outPos, hist_[c].data() + histPos,
-                        safe * sizeof(float));
-    }
-
-    // ------------------------------------------------------------------
-    void saveOverlap(int histPos) {
-        int pos = std::clamp(histPos, 0, histLen_ - cfg_.overlapLen);
-        for (int c = 0; c < ch_; ++c)
-            std::memcpy(overlap_[c].data(), hist_[c].data() + pos,
-                        cfg_.overlapLen * sizeof(float));
-        hasOverlap_ = true;
-    }
-
-    // ------------------------------------------------------------------
     // Discard history samples behind the read cursor
-    // ------------------------------------------------------------------
     void compact() {
-        int discard = (int)readPos_ - cfg_.seekWin - cfg_.overlapLen;
-        if (discard <= 0) return;
-        discard = std::min(discard, histLen_);
+        int samples_to_discard = static_cast<int>(read_position_)
+                             - configuration_.seekWindow
+                             - configuration_.overlapLength;
+        if (samples_to_discard <= 0) {
+            return;
+        }
+        samples_to_discard = std::min(samples_to_discard, history_length_);
 
-        for (int c = 0; c < ch_; ++c)
-            std::memmove(hist_[c].data(), hist_[c].data() + discard,
-                         (histLen_ - discard) * sizeof(float));
-        histLen_  -= discard;
-        readPos_  -= discard;
+        for (int channel_index = 0; channel_index < channel_count_; ++channel_index) {
+            std::memmove(
+                history_[channel_index].data(),
+                history_[channel_index].data() + samples_to_discard,
+                (history_length_ - samples_to_discard) * sizeof(float));
+        }
+        history_length_ -= samples_to_discard;
+        read_position_ -= samples_to_discard;
     }
 };

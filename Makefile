@@ -22,7 +22,7 @@ PROC_SRC    = sample/wsola-processor.js
 
 all: $(WORKLET)
 
-$(OUT): $(SRC) $(SRC_DIR)/wsola.h | $(BUILD_DIR)
+$(OUT): $(SRC) $(SRC_DIR)/wsola.h $(SRC_DIR)/ring_buffer.h | $(BUILD_DIR)
 	$(EMCC) $(CXXFLAGS) $(LDFLAGS) $(SRC) -o $(OUT)
 
 $(WORKLET): $(OUT) $(PROC_SRC)
