@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cassert>
 #include <vector>
 
@@ -52,20 +53,30 @@ public:
         write_ = (write_ + count) % capacity_;
     }
 
-    // Read from an arbitrary position (relative to read pointer) without consuming.
-    void peek(float** output, int output_offset, int position, int count) const {
-        for (int ch = 0; ch < channel_count_; ++ch) {
-            int pos = (read_ + position) % capacity_;
-            for (int i = 0; i < count; ++i) {
-                output[ch][output_offset + i] = data_[ch][pos];
-                if (++pos >= capacity_) pos = 0;
-            }
+    // Read one channel from an arbitrary position (relative to read pointer)
+    // without consuming.
+    void peek(int channel, float* output, int output_offset, int position,
+              int count) const {
+        assert(channel >= 0 && channel < channel_count_);
+        assert(position >= 0);
+        assert(count >= 0);
+        assert(position + count <= buffered());
+
+        if (count <= 0) return;
+        int pos = (read_ + position) % capacity_;
+        for (int i = 0; i < count; ++i) {
+            output[output_offset + i] = data_[channel][pos];
+            if (++pos >= capacity_) pos = 0;
         }
     }
 
     // Read and consume samples.
     void read(float** output, int output_offset, int count) {
-        peek(output, output_offset, 0, count);
+        if (count <= 0) return;
+
+        for (int ch = 0; ch < channel_count_; ++ch) {
+            peek(ch, output[ch], output_offset, 0, count);
+        }
         read_ = (read_ + count) % capacity_;
     }
 

@@ -100,14 +100,19 @@ private:
             if (read_pos < available) {
                 /* 残りのサンプルだけ読み込み、残りはゼロのまま */
                 int available_from_read = available - read_pos;
-                input_ring_buffer_.peek(temp_ptrs_.data(), 0, read_pos, available_from_read);
+                for (int ch = 0; ch < channel_count_; ++ch) {
+                    input_ring_buffer_.peek(
+                        ch, temp_ptrs_[ch], 0, read_pos, available_from_read);
+                }
             } else {
                 /* 読み取り位置が利用可能範囲を完全に超えている */
                 frame_is_fully_padded = true;
             }
         } else {
             /* 通常読み取り：入力バッファから1フレーム分を非消費的に取得 */
-            input_ring_buffer_.peek(temp_ptrs_.data(), 0, read_pos, frame_size_);
+            for (int ch = 0; ch < channel_count_; ++ch) {
+                input_ring_buffer_.peek(ch, temp_ptrs_[ch], 0, read_pos, frame_size_);
+            }
         }
 
         /* 出力バッファに書き込み可能な空きがあるか確認 */
