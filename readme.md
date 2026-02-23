@@ -69,5 +69,5 @@ TimeStretcherクラスの作成・PhaseVocoderクラスのひな型を作成
 - FFTサイズ・Overlap範囲などの調整
 
 # その他
-SignalSmithのアプローチ（https://signalsmith-audio.co.uk/writing/2023/stretch-design/）から影響を受けています。
+SignalSmithのアプローチ（https://signalsmith-audio.co.uk/writing/2023/stretch-design/）から着想を得ています。
 彼のtwo-step sweepはIIRを使ったものですが、それをFIRにすることが最初の着眼点です。 

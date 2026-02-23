@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ja">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -12,10 +12,11 @@
       color: #e0e0e0;
       display: flex;
       justify-content: center;
+      align-items: flex-start;
       padding: 40px 20px;
       min-height: 100vh;
     }
-    .container { max-width: 560px; width: 100%; }
+    .container { max-width: 860px; width: 100%; }
     h1 { text-align: center; margin-bottom: 24px; font-size: 22px; color: #fff; }
     .card {
       background: #16213e;
@@ -121,6 +122,63 @@
     }
     .time { text-align: center; margin-top: 6px; font-size: 13px; color: #888; }
     .status { text-align: center; margin-top: 10px; font-size: 12px; color: #8f95b4; }
+    .algo-card { line-height: 1.65; }
+    .algo-title {
+      font-size: 20px;
+      margin-bottom: 6px;
+      color: #fff;
+    }
+    .algo-subtitle {
+      font-size: 13px;
+      color: #9ba3c8;
+      margin-bottom: 18px;
+    }
+    .algo-section + .algo-section {
+      margin-top: 20px;
+      padding-top: 20px;
+      border-top: 1px solid #27345c;
+    }
+    .algo-section h3 {
+      font-size: 16px;
+      margin-bottom: 10px;
+      color: #dce3ff;
+    }
+    .algo-section h4 {
+      font-size: 14px;
+      margin: 12px 0 8px;
+      color: #bcc7ee;
+    }
+    .step-list, .bullet-list {
+      padding-left: 20px;
+      color: #d9dcf5;
+    }
+    .step-list li + li, .bullet-list li + li { margin-top: 6px; }
+    .formula {
+      margin: 10px 0 4px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: #0f1730;
+      border: 1px solid #283763;
+      color: #9ad1ff;
+      font-family: 'Cascadia Mono', 'Consolas', monospace;
+      font-size: 13px;
+      overflow-x: auto;
+      white-space: pre;
+    }
+    .note {
+      margin-top: 16px;
+      padding: 10px 12px;
+      border-left: 3px solid #6c63ff;
+      background: rgba(108, 99, 255, 0.08);
+      color: #cdd4f5;
+      font-size: 13px;
+      border-radius: 6px;
+    }
+    @media (max-width: 700px) {
+      body { padding: 20px 12px; }
+      .card { padding: 18px; }
+      .algo-title { font-size: 18px; }
+    }
   </style>
 </head>
 <body>
@@ -167,6 +225,60 @@
     </div>
     <div class="time" id="time">0:00 / 0:00</div>
     <div class="status" id="status"></div>
+  </div>
+
+  <div class="card algo-card">
+    <h2 class="algo-title">アルゴリズムの説明</h2>
+    <p class="algo-subtitle">READMEの内容をデモ画面向けに整理した要約です。</p>
+
+    <section class="algo-section">
+      <h3>処理概要</h3>
+      <ol class="step-list">
+        <li>入力信号をリングバッファに格納し、Hann窓を適用してFFTを実行する。</li>
+        <li>各binに対してPhase Vocoderの水平位相更新を実行する。</li>
+        <li>周波数方向の位相整合として、垂直位相補正を適用する。</li>
+        <li>IFFT後に窓掛けとOLAを行い、時間領域へ再合成する。</li>
+      </ol>
+    </section>
+
+    <section class="algo-section">
+      <h3>垂直位相補正仕様</h3>
+
+      <h4>目的</h4>
+      <ul class="bullet-list">
+        <li>隣接bin間の位相関係を保持する phase locking の一種。</li>
+        <li>ピーク追跡やbin分類は行わず、全binに同じルールを適用。</li>
+        <li>リアルタイム処理を想定し、分岐を抑えたコスパ重視の設計。</li>
+      </ul>
+
+      <h4>処理手順</h4>
+      <ol class="step-list">
+        <li>
+          位相勾配の抽出
+          <pre class="formula">V[k] = (X[k] * conj(X[k-1])) / |X[k] * conj(X[k-1])|</pre>
+        </li>
+        <li>
+          隣接bin提案の生成
+          <pre class="formula">P_below = H[k-1] * V[k]
+P_above = H[k+1] * conj(V[k+1])</pre>
+        </li>
+        <li>
+          合意ベクトルの算出
+          <pre class="formula">C[k] = H[k] + w_b * P_below + w_a * P_above</pre>
+        </li>
+        <li>
+          位相反映（振幅保持）
+          <pre class="formula">Y[k] = |X[k]| * C[k] / |C[k]|</pre>
+        </li>
+      </ol>
+
+      <h4>実装上の特性</h4>
+      <ul class="bullet-list">
+        <li>終端bin処理は if 分岐ではなく index/mask で吸収し、最適化しやすくする。</li>
+        <li>ピーク検出なしで全binに同一処理を適用し、複雑さを下げる。</li>
+      </ul>
+    </section>
+
   </div>
 </div>
 
