@@ -13,8 +13,6 @@
 
 #include "ring_buffer.h"
 
-#define FRAME_MS 30
-
 class TimeStretcher {
 public:
     virtual ~TimeStretcher() = default;
@@ -22,20 +20,13 @@ public:
     void init(int sample_rate, int channel_count) {
         sampling_rate_ = sample_rate;
         channel_count_ = channel_count;
-        frame_size_ = sampling_rate_ * FRAME_MS / 1000;
 
-        int capacity = frame_size_ * 10;
+        onInit();
+
+        int capacity = getRequiredBufferCapacity();
         input_ring_buffer_.init(channel_count_, capacity);
         output_ring_buffer_.init(channel_count_, capacity);
 
-        temp_frame_.resize(channel_count_);
-        temp_ptrs_.resize(channel_count_);
-        for (int ch = 0; ch < channel_count_; ++ch) {
-            temp_frame_[ch].resize(frame_size_, 0.0f);
-            temp_ptrs_[ch] = temp_frame_[ch].data();
-        }
-
-        onInit();
         reset();
     }
 
@@ -126,6 +117,9 @@ protected:
     // Subclass implements: fill output_ring_buffer_ until it has >= needed_output samples.
     virtual void produce_frames(int needed_output) = 0;
 
+    // Subclass returns the required ring buffer capacity.
+    virtual int getRequiredBufferCapacity() const = 0;
+
     // Optional hooks for subclass-specific init/reset.
     virtual void onInit() {}
     virtual void onReset() {}
@@ -147,33 +141,8 @@ protected:
         }
     }
 
-    // Build crossfade ramps from a half-Hann shape.
-    // fade_in[n] = 0.5 - 0.5 cos(pi*n/(N-1))
-    // fade_out[n] = 1 - fade_in[n]
-    static void generate_hann_crossfade(int size, std::vector<float>& fade_in,
-                                        std::vector<float>& fade_out) {
-        fade_in.assign(size, 0.0f);
-        fade_out.assign(size, 0.0f);
-        if (size <= 0) return;
-        if (size == 1) {
-            fade_in[0] = 1.0f;
-            fade_out[0] = 0.0f;
-            return;
-        }
-
-        const double pi = 3.14159265358979323846;
-        const double denom = static_cast<double>(size - 1);
-        for (int i = 0; i < size; ++i) {
-            const double x = static_cast<double>(i) / denom;
-            const float in = static_cast<float>(0.5 - 0.5 * std::cos(pi * x));
-            fade_in[i] = in;
-            fade_out[i] = 1.0f - in;
-        }
-    }
-
     int sampling_rate_ = 44100;
     int channel_count_ = 2;
-    int frame_size_ = 0;
     float time_stretch_ratio_ = 1.0f;
     float phase_control_ = 0.0f;
     bool input_ended_ = false;
@@ -181,7 +150,4 @@ protected:
 
     MultiChannelRingBuffer input_ring_buffer_;
     MultiChannelRingBuffer output_ring_buffer_;
-
-    std::vector<std::vector<float>> temp_frame_;
-    std::vector<float*> temp_ptrs_;
 };

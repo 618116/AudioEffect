@@ -14,7 +14,7 @@ LDFLAGS     = -s EXPORTED_FUNCTIONS="['_malloc','_free','_ts_init','_ts_reset','
               -s ASSERTIONS=0 \
               -s ENVIRONMENT=web,worker \
               -s ALLOW_MEMORY_GROWTH=0 \
-              -s INITIAL_MEMORY=10mb \
+              -s INITIAL_MEMORY=1mb \
               -s SINGLE_FILE=1
 
 WORKLET     = $(BUILD_DIR)/pv-worklet.js

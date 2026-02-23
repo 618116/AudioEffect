@@ -18,6 +18,10 @@
 
 class PhaseVocoder : public TimeStretcher {
 protected:
+    int getRequiredBufferCapacity() const override {
+        return kFixedFftSize_ * 3;
+    }
+
     void onInit() override {
         fft_size_ = kFixedFftSize_;
         analysis_hop_ = std::max(1, fft_size_ / 4);  // Typical 75% overlap.
