@@ -1,10 +1,10 @@
-// wsola-processor.js - AudioWorklet processor for runtime-selectable time stretching
-// Loaded as a blob URL combined with wsola.js (Emscripten WASM module)
+// pv-processor.js - AudioWorklet processor for Phase Vocoder time stretching
+// Loaded as a blob URL combined with pv.js (Emscripten WASM module)
 
 const BLOCK_SIZE = 128; // AudioWorklet render quantum
 const MAX_INPUT = 2048; // Max input samples per process call
 
-class WSOLAProcessor extends AudioWorkletProcessor {
+class PVProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
     this.ready = false;
@@ -16,7 +16,6 @@ class WSOLAProcessor extends AudioWorkletProcessor {
     this.readPos = 0;
     this.totalSamples = 0;
     this.numChannels = 2;
-    this.algorithm = 0; // 0 = WSOLA, 1 = Phase Vocoder
 
     // WASM heap pointers
     this.inPtrs = 0; // float** for input
@@ -29,21 +28,19 @@ class WSOLAProcessor extends AudioWorkletProcessor {
     this.port.onmessage = (e) => this.onMessage(e.data);
 
     const opts = options.processorOptions || {};
-    this.algorithm = opts.algorithm === 1 ? 1 : 0;
     this.initWasm(opts.sampleRate || sampleRate, opts.channels || 2);
   }
 
   async initWasm(sr, ch) {
     try {
-      // Module is defined by the concatenated wsola.js (Emscripten MODULARIZE output)
+      // Module is defined by the concatenated pv.js (Emscripten MODULARIZE output)
       const mod = await Module();
       this.wasm = mod;
       this.numChannels = ch;
-      if (mod._ts_setAlgorithm) mod._ts_setAlgorithm(this.algorithm);
       mod._ts_init(sr, ch);
       this.allocBuffers(ch);
       this.ready = true;
-      this.port.postMessage({ type: 'ready', algorithm: this.algorithm });
+      this.port.postMessage({ type: 'ready' });
     } catch (e) {
       this.port.postMessage({ type: 'error', message: String(e) });
     }
@@ -94,12 +91,6 @@ class WSOLAProcessor extends AudioWorkletProcessor {
       case 'phase':
         if (this.wasm) this.wasm._ts_setPhaseControl(data.value);
         break;
-      case 'algorithm':
-        this.algorithm = data.value === 1 ? 1 : 0;
-        if (this.wasm && this.wasm._ts_setAlgorithm) {
-          this.wasm._ts_setAlgorithm(this.algorithm);
-        }
-        break;
       case 'seek':
         this.readPos = Math.max(0, Math.floor(data.position));
         if (this.wasm) this.wasm._ts_reset();
@@ -130,7 +121,7 @@ class WSOLAProcessor extends AudioWorkletProcessor {
     }
     this.readPos += avail;
 
-    // Process one render block in the currently selected algorithm.
+    // Process one render block
     const produced = M._ts_process(
       this.inPtrs, avail, eof, this.outPtrs, BLOCK_SIZE);
 
@@ -164,4 +155,4 @@ class WSOLAProcessor extends AudioWorkletProcessor {
   }
 }
 
-registerProcessor('wsola-processor', WSOLAProcessor);
+registerProcessor('pv-processor', PVProcessor);

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Time Stretch Demo (WSOLA / Phase Vocoder)</title>
+  <title>Time Stretch Demo (Phase Vocoder)</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -30,7 +30,6 @@
       letter-spacing: 0.04em;
       text-transform: uppercase;
     }
-    .mode-select,
     .source-select {
       display: flex;
       gap: 18px;
@@ -38,9 +37,7 @@
       padding: 10px 0;
       flex-wrap: wrap;
     }
-    .mode-select { padding-top: 2px; }
     .source-select { padding-top: 4px; }
-    .mode-select label,
     .source-select label {
       cursor: pointer;
       font-size: 14px;
@@ -48,7 +45,6 @@
       align-items: center;
       gap: 5px;
     }
-    .mode-select input[type=radio],
     .source-select input[type=radio] { accent-color: #6c63ff; }
     .file-info { margin-top: 10px; font-size: 13px; color: #888; text-align: center; }
     .slider-group { margin-bottom: 20px; }
@@ -113,15 +109,9 @@
 </head>
 <body>
 <div class="container">
-  <h1>Time Stretch (WSOLA / Phase Vocoder)</h1>
+  <h1>Time Stretch (Phase Vocoder)</h1>
 
   <div class="card">
-    <div class="row-title">Algorithm</div>
-    <div class="mode-select">
-      <label><input type="radio" name="algorithm" value="0" checked> WSOLA</label>
-      <label><input type="radio" name="algorithm" value="1"> Phase Vocoder</label>
-    </div>
-
     <div class="row-title">Source</div>
     <div class="source-select">
       <label><input type="radio" name="source" value="data/music.wav" checked> music.wav</label>
@@ -185,18 +175,10 @@
   const timeEl = $('time');
 
   const sourceRadios = document.querySelectorAll('input[name="source"]');
-  const algorithmRadios = document.querySelectorAll('input[name="algorithm"]');
 
   const fmt = (s) => {
     const m = Math.floor(s / 60);
     return m + ':' + String(Math.floor(s % 60)).padStart(2, '0');
-  };
-
-  const algorithmLabel = (mode) => (mode === 1 ? 'Phase Vocoder' : 'WSOLA');
-
-  const getSelectedAlgorithm = () => {
-    const selected = document.querySelector('input[name="algorithm"]:checked');
-    return selected && selected.value === '1' ? 1 : 0;
   };
 
   function updateUI() {
@@ -214,16 +196,7 @@
     }
   }
 
-  function applySelectedAlgorithm() {
-    const mode = getSelectedAlgorithm();
-    send('algorithm', { value: mode });
-    if (node) {
-      status.textContent = 'Ready (' + algorithmLabel(mode) + ')';
-    }
-  }
-
   sourceRadios.forEach((r) => r.addEventListener('change', () => loadFromUrl(r.value)));
-  algorithmRadios.forEach((r) => r.addEventListener('change', applySelectedAlgorithm));
 
   playBtn.addEventListener('click', () => {
     send('play');
@@ -279,8 +252,7 @@
       return;
     }
     if (d.type === 'ready') {
-      const mode = typeof d.algorithm === 'number' ? d.algorithm : getSelectedAlgorithm();
-      status.textContent = 'Ready (' + algorithmLabel(mode) + ')';
+      status.textContent = 'Ready (Phase Vocoder)';
       return;
     }
     if (d.type === 'error') {
@@ -294,23 +266,20 @@
       ctx = new AudioContext();
       sr = ctx.sampleRate;
 
-      await ctx.audioWorklet.addModule('../build/wsola-worklet.js');
+      await ctx.audioWorklet.addModule('../build/pv-worklet.js');
 
-      const mode = getSelectedAlgorithm();
-      node = new AudioWorkletNode(ctx, 'wsola-processor', {
+      node = new AudioWorkletNode(ctx, 'pv-processor', {
         numberOfInputs: 0,
         numberOfOutputs: 1,
         outputChannelCount: [2],
         processorOptions: {
           sampleRate: ctx.sampleRate,
           channels: 2,
-          algorithm: mode,
         },
       });
       node.connect(ctx.destination);
       node.port.onmessage = onWorkletMsg;
 
-      send('algorithm', { value: mode });
       send('ratio', { value: parseFloat(ratioIn.value) });
       send('phase', { value: phaseToggle.checked ? 1.0 : 0.0 });
 
