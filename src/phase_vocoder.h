@@ -1,11 +1,4 @@
 #pragma once
-// ============================================================================
-// phase_vocoder.h - Outline for a phase-vocoder time stretcher
-//
-// This file is intentionally an implementation outline.
-// It wires state, data flow, and method boundaries so the DSP parts can be
-// filled in incrementally.
-// ============================================================================
 
 #include <algorithm>
 #include <cassert>
@@ -24,7 +17,7 @@ protected:
 
     void onInit() override {
         fft_size_ = kFixedFftSize_;
-        analysis_hop_ = std::max(1, fft_size_ / 4);  // Typical 75% overlap.
+        analysis_hop_ = std::max(1, fft_size_ / 4);
         bin_count_ = (fft_size_ / 2) + 1;
         fft_.init(fft_size_);
 
@@ -76,7 +69,7 @@ private:
     int bin_count_ = 0;                                       /* 実数FFTの有効ビン数 */
     double analysis_read_pos_ = 0.0;                          /* 入力リングバッファの読み取り位置 */
     bool has_phase_history_ = false;                          /* 前回フレームの位相履歴があるか */
-    SimpleFFT fft_;                                           /* FFT/IFFTを実行するヘルパ */
+    SimpleFFT fft_;
     static constexpr float kNormFloor_ = 1.0e-6f;            /* 正規化時のゼロ割り防止しきい値 */
     static constexpr float kDrainEpsilon_ = 1.0e-8f;         /* 入力終端時の無音判定しきい値 */
     static constexpr float kConsensusNormFloorSq_ = 1.0e-20f;/* consensus正規化の最小ノルム二乗 */
@@ -91,13 +84,14 @@ private:
     std::vector<std::vector<std::complex<float>>> spectrum_;         /* 周波数領域スペクトル */
     std::vector<std::vector<float>> prev_phase_;                     /* 前回の解析位相 */
     std::vector<std::vector<float>> sum_phase_;                      /* 位相累積値（PV本体） */
-    std::vector<std::vector<float>> legacy_phase_;                   /* 最終採用する位相 */
+    std::vector<std::vector<float>> legacy_phase_;                   /* 水平位相補正後の基準位相（consensus無効時はそのまま出力位相） */
     std::vector<std::vector<float>> magnitude_;                      /* 各ビンの振幅 */
     std::vector<std::vector<float>> original_phase_;                 /* 入力スペクトルの元位相 */
     std::vector<std::vector<std::complex<float>>> horizontal_;       /* 水平方向伝播用スペクトル */
     std::vector<std::vector<std::complex<float>>> consensus_complex_;/* consensus適用後スペクトル */
     std::vector<std::vector<std::complex<float>>> gradient_unit_;    /* 隣接ビン位相差の単位ベクトル */
 
+    /* 処理の中で可能な限り条件分岐をなくすためにマスクで端っこbinの処理をする */
     std::vector<int> below_index_;                            /* 下側隣接ビンのindex */
     std::vector<int> above_index_;                            /* 上側隣接ビンのindex */
     std::vector<float> below_mask_;                           /* 下側隣接ビンが存在するかのマスク */
@@ -185,7 +179,7 @@ private:
 
         if (output_ring_buffer_.writable() < syn_hop) return false;
 
-        // Step 1: analysis FFT for each channel.
+        /* FFT */
         for (int ch = 0; ch < channel_count_; ++ch) {
             auto& frame = time_frame_[ch];
             std::fill(frame.begin(), frame.end(), 0.0f);
@@ -233,16 +227,15 @@ private:
                     static_cast<float>(syn_hop) /
                     static_cast<float>(fft_size_);
 
-                const float delta =
-                    wrap_phase(phase - prev[k] - expected_analysis);
-                sum[k] =
-                    wrap_phase(sum[k] + expected_synthesis + delta * hop_ratio);
+                const float delta = wrap_phase(phase - prev[k] - expected_analysis);
+                sum[k] = wrap_phase(sum[k] + expected_synthesis + delta * hop_ratio);
                 prev[k] = phase;
                 legacy[k] = sum[k];
             }
         }
 
-        /* 垂直位相補正 */
+        /* 垂直位相補正
+         * 条件分岐をできるだけ避け、コンパイラ最適化やSIMDが聞きやすくしてある */
         if (use_consensus) {
             for (int ch = 0; ch < channel_count_; ++ch) {
                 auto& grad = gradient_unit_[ch];

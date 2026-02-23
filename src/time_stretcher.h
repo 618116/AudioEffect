@@ -1,10 +1,4 @@
 #pragma once
-// ============================================================================
-// time_stretcher.h - Base class for time-stretch algorithms
-//
-// Owns the input/output ring buffers and the process() shell.
-// Subclasses implement produce_frames() with their specific algorithm.
-// ============================================================================
 
 #include <algorithm>
 #include <cmath>
@@ -59,8 +53,6 @@ public:
                 float** output, int output_sample_count) {
         const bool passthrough = (playback_rate_ == 1.0f);
         if (passthrough) {
-            // Keep passthrough bit-perfect and avoid stale buffered audio when
-            // playback rate toggles between 1.0 and stretched modes.
             if (!passthrough_active_) {
                 reset();
                 passthrough_active_ = true;

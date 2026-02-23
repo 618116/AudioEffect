@@ -47,6 +47,22 @@
     }
     .source-select input[type=radio] { accent-color: #6c63ff; }
     .file-info { margin-top: 10px; font-size: 13px; color: #888; text-align: center; }
+    .drop-zone {
+      margin-top: 12px;
+      border: 2px dashed #3a3a6a;
+      border-radius: 8px;
+      padding: 24px 16px;
+      text-align: center;
+      color: #6c6c9a;
+      font-size: 14px;
+      cursor: pointer;
+      transition: border-color .2s, color .2s, background .2s;
+    }
+    .drop-zone.dragover {
+      border-color: #6c63ff;
+      color: #6c63ff;
+      background: rgba(108, 99, 255, 0.08);
+    }
     .slider-group { margin-bottom: 20px; }
     .slider-label {
       display: flex;
@@ -114,10 +130,12 @@
   <div class="card">
     <div class="row-title">Source</div>
     <div class="source-select">
-      <label><input type="radio" name="source" value="data/music.wav" checked> music.wav</label>
-      <label><input type="radio" name="source" value="data/voice.wav"> voice.wav</label>
-      <label><input type="radio" name="source" value="data/se.mp3"> se.mp3</label>
+      <label><input type="radio" name="source" value="data/pop.mp3" checked> pop</label>
+      <label><input type="radio" name="source" value="data/classical.mp3"> classical</label>
+      <label><input type="radio" name="source" value="data/rock.mp3"> rock</label>
     </div>
+    <div class="drop-zone" id="dropZone">Drop audio file here or click to select</div>
+    <input type="file" id="fileInput" accept="audio/*" style="display:none">
     <div class="file-info" id="info"></div>
   </div>
 
@@ -175,6 +193,8 @@
   const timeEl = $('time');
 
   const sourceRadios = document.querySelectorAll('input[name="source"]');
+  const dropZone = $('dropZone');
+  const fileInput = $('fileInput');
 
   const fmt = (s) => {
     const m = Math.floor(s / 60);
@@ -197,6 +217,19 @@
   }
 
   sourceRadios.forEach((r) => r.addEventListener('change', () => loadFromUrl(r.value)));
+
+  dropZone.addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+  dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    const file = e.dataTransfer.files[0];
+    if (file) loadFromFile(file);
+  });
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0]) loadFromFile(fileInput.files[0]);
+  });
 
   playBtn.addEventListener('click', () => {
     send('play');
@@ -292,6 +325,36 @@
     }
   })();
 
+  async function loadFromFile(file) {
+    if (!node) { info.textContent = 'Worklet not ready yet'; return; }
+    info.textContent = 'Loading...';
+    sourceRadios.forEach((r) => r.checked = false);
+    try {
+      const arrayBuf = await file.arrayBuffer();
+      const buf = await ctx.decodeAudioData(arrayBuf);
+      loadAudioBuffer(buf, file.name);
+    } catch (e) {
+      info.textContent = 'Error: ' + e.message;
+    }
+  }
+
+  function loadAudioBuffer(buf, name) {
+    totalSamples = buf.length;
+    curPos = 0;
+    if (playing) { send('stop'); playing = false; }
+
+    const ch0 = new Float32Array(buf.getChannelData(0));
+    const ch1 = buf.numberOfChannels > 1
+      ? new Float32Array(buf.getChannelData(1))
+      : new Float32Array(ch0);
+
+    node.port.postMessage({ type: 'audio', channelData: [ch0, ch1], channels: 2 });
+    info.textContent =
+      name + '  (' + fmt(buf.length / sr) + ', ' +
+      buf.numberOfChannels + 'ch, ' + sr + ' Hz)';
+    updateUI();
+  }
+
   async function loadFromUrl(url) {
     if (!node) {
       info.textContent = 'Worklet not ready yet';
@@ -302,27 +365,7 @@
       const resp = await fetch(url);
       if (!resp.ok) throw new Error('File not found: ' + url);
       const buf = await ctx.decodeAudioData(await resp.arrayBuffer());
-
-      totalSamples = buf.length;
-      curPos = 0;
-
-      if (playing) {
-        send('stop');
-        playing = false;
-      }
-
-      const ch0 = new Float32Array(buf.getChannelData(0));
-      const ch1 = buf.numberOfChannels > 1
-        ? new Float32Array(buf.getChannelData(1))
-        : new Float32Array(ch0);
-
-      node.port.postMessage({ type: 'audio', channelData: [ch0, ch1], channels: 2 });
-
-      const name = url.split('/').pop();
-      info.textContent =
-        name + '  (' + fmt(buf.length / sr) + ', ' +
-        buf.numberOfChannels + 'ch, ' + sr + ' Hz)';
-      updateUI();
+      loadAudioBuffer(buf, url.split('/').pop());
     } catch (e) {
       info.textContent = 'Error: ' + e.message;
     }
