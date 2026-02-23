@@ -8,6 +8,7 @@
 // ============================================================================
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <complex>
 #include <vector>
@@ -41,7 +42,6 @@ protected:
             std::fill(legacy_phase_[ch].begin(), legacy_phase_[ch].end(), 0.0f);
             std::fill(magnitude_[ch].begin(), magnitude_[ch].end(), 0.0f);
             std::fill(original_phase_[ch].begin(), original_phase_[ch].end(), 0.0f);
-            std::fill(consensus_phase_[ch].begin(), consensus_phase_[ch].end(), 0.0f);
             std::fill(horizontal_[ch].begin(), horizontal_[ch].end(),
                       std::complex<float>(0.0f, 0.0f));
             std::fill(consensus_complex_[ch].begin(), consensus_complex_[ch].end(),
@@ -65,8 +65,10 @@ private:
     static constexpr int kFixedFftSize_ = 4096;
     static constexpr float kPi_ = 3.14159265358979323846f;
     static constexpr float kTwoPi_ = 2.0f * kPi_;
+    static constexpr float kMinStretchRatio_ = 0.5f;
     int fft_size_ = 0;
     int analysis_hop_ = 0;
+    int max_syn_hop_ = 0;
     int bin_count_ = 0;
     double analysis_read_pos_ = 0.0;
     bool has_phase_history_ = false;
@@ -88,7 +90,6 @@ private:
     std::vector<std::vector<float>> legacy_phase_;
     std::vector<std::vector<float>> magnitude_;
     std::vector<std::vector<float>> original_phase_;
-    std::vector<std::vector<float>> consensus_phase_;
     std::vector<std::vector<std::complex<float>>> horizontal_;
     std::vector<std::vector<std::complex<float>>> consensus_complex_;
     std::vector<std::vector<std::complex<float>>> gradient_unit_;
@@ -97,7 +98,6 @@ private:
     std::vector<int> above_index_;
     std::vector<float> below_mask_;
     std::vector<float> above_mask_;
-    std::vector<float> neighbor_count_;
 
     static float wrap_phase(float phase) {
         phase = std::fmod(phase + kPi_, kTwoPi_);
@@ -107,17 +107,20 @@ private:
 
     int synthesis_hop() const {
         // Ratio > 1.0 means slower output, so synthesis hop is smaller.
-        float ratio = std::max(0.01f, time_stretch_ratio_);
+        const float ratio = std::max(kMinStretchRatio_, time_stretch_ratio_);
         int hop = static_cast<int>(std::lround(
             static_cast<double>(analysis_hop_) / static_cast<double>(ratio)));
         return std::max(1, hop);
     }
 
     void resize_state_buffers() {
+        max_syn_hop_ = std::max(
+            1, static_cast<int>(std::lround(static_cast<double>(analysis_hop_)
+                                            / static_cast<double>(kMinStretchRatio_))));
         time_frame_.assign(channel_count_, std::vector<float>(fft_size_, 0.0f));
         synthesis_accum_.assign(channel_count_, std::vector<float>(fft_size_, 0.0f));
         synthesis_norm_.assign(channel_count_, std::vector<float>(fft_size_, 0.0f));
-        hop_frame_.assign(channel_count_, std::vector<float>(analysis_hop_, 0.0f));
+        hop_frame_.assign(channel_count_, std::vector<float>(max_syn_hop_, 0.0f));
         spectrum_.assign(
             channel_count_, std::vector<std::complex<float>>(bin_count_));
         prev_phase_.assign(channel_count_, std::vector<float>(bin_count_, 0.0f));
@@ -125,7 +128,6 @@ private:
         legacy_phase_.assign(channel_count_, std::vector<float>(bin_count_, 0.0f));
         magnitude_.assign(channel_count_, std::vector<float>(bin_count_, 0.0f));
         original_phase_.assign(channel_count_, std::vector<float>(bin_count_, 0.0f));
-        consensus_phase_.assign(channel_count_, std::vector<float>(bin_count_, 0.0f));
         horizontal_.assign(
             channel_count_, std::vector<std::complex<float>>(bin_count_));
         consensus_complex_.assign(
@@ -137,7 +139,6 @@ private:
         above_index_.assign(bin_count_, 0);
         below_mask_.assign(bin_count_, 0.0f);
         above_mask_.assign(bin_count_, 0.0f);
-        neighbor_count_.assign(bin_count_, 0.0f);
         const int last = std::max(0, bin_count_ - 1);
         for (int k = 0; k < bin_count_; ++k) {
             const int below = std::max(0, k - 1);
@@ -149,7 +150,6 @@ private:
             above_index_[k] = above;
             below_mask_[k] = has_below;
             above_mask_[k] = has_above;
-            neighbor_count_[k] = has_below + has_above;
         }
 
         hop_ptrs_.resize(channel_count_);
@@ -160,11 +160,9 @@ private:
 
     bool produce_one_hop() {
         const int syn_hop = synthesis_hop();
-        if (static_cast<int>(hop_frame_[0].size()) != syn_hop) {
-            hop_frame_.assign(channel_count_, std::vector<float>(syn_hop, 0.0f));
-            for (int ch = 0; ch < channel_count_; ++ch) {
-                hop_ptrs_[ch] = hop_frame_[ch].data();
-            }
+        if (syn_hop > max_syn_hop_) {
+            assert(false && "syn_hop exceeds preallocated hop frame size");
+            return false;
         }
 
         const int read_pos = static_cast<int>(std::floor(analysis_read_pos_));
@@ -195,11 +193,11 @@ private:
 
         const bool use_consensus =
             has_phase_history_ && channel_count_ > 0 && phase_control_ > 0.0f;
-        const float w = phase_control_;
+        const float consensus_weight = phase_control_;
         const float hop_ratio =
             static_cast<float>(syn_hop) / static_cast<float>(analysis_hop_);
 
-        // Step 2: legacy horizontal phase update for all channels.
+        /* 単純な水平位相補正 */
         for (int ch = 0; ch < channel_count_; ++ch) {
             auto& prev = prev_phase_[ch];
             auto& sum = sum_phase_[ch];
@@ -237,23 +235,30 @@ private:
             }
         }
 
-        // Steps 3-6: per-channel horizontal spectrum + branchless all-bin consensus.
+        /* 垂直位相補正 */
         if (use_consensus) {
             for (int ch = 0; ch < channel_count_; ++ch) {
                 auto& grad = gradient_unit_[ch];
                 auto& horiz = horizontal_[ch];
                 auto& cons = consensus_complex_[ch];
-                auto& phase_cons = consensus_phase_[ch];
                 auto& phase_orig = original_phase_[ch];
                 auto& legacy = legacy_phase_[ch];
                 auto& mag_out = magnitude_[ch];
 
+                /* bin kとk-1の間の位相勾配（時間領域の群遅延）を計算する */
                 grad[0] = std::complex<float>(1.0f, 0.0f);
                 for (int k = 1; k < bin_count_; ++k) {
-                    const float dphi = wrap_phase(phase_orig[k] - phase_orig[k - 1]);
-                    grad[k] = std::polar(1.0f, dphi);
+                    /* 高速化のためにpolarの代わりに複素共役積でやる */
+                    /* const float dphi = wrap_phase(phase_orig[k] - phase_orig[k - 1]);
+                     * grad[k] = std::polar(1.0f, dphi); */
+
+                    /* 複素共役の積でベクトルを求めて角度だけ抽出する */
+                    std::complex<float> delta_vec = spectrum_[ch][k] * std::conj(spectrum_[ch][k - 1]);
+                    const float norm_sq = std::norm(delta_vec);
+                    grad[k] = (norm_sq > kConsensusNormFloorSq_)? (delta_vec * (1.0f / std::sqrt(norm_sq))): std::complex<float>(1.0f, 0.0f);
                 }
 
+                /* 水平位相更新で得られたスペクトル点を複素数表現に変換して保存 */
                 for (int k = 0; k < bin_count_; ++k) {
                     horiz[k] = std::polar(mag_out[k], legacy[k]);
                 }
@@ -261,34 +266,32 @@ private:
                 for (int k = 0; k < bin_count_; ++k) {
                     const int below = below_index_[k];
                     const int above = above_index_[k];
-                    const float wb = w * below_mask_[k];
-                    const float wa = w * above_mask_[k];
+                    const float wb = consensus_weight * below_mask_[k];
+                    const float wa = consensus_weight * above_mask_[k];
 
+                    /* bin kの上下の隣接点から、水平スペクトル点を位相勾配で回転させたものを得る */
                     const std::complex<float> p_below = horiz[below] * grad[k];
-                    const std::complex<float> p_above =
-                        horiz[above] * std::conj(grad[above]);
+                    const std::complex<float> p_above = horiz[above] * std::conj(grad[above]); /* 逆方向は共役複素数 */
 
-                    const float denom = 1.0f + w * neighbor_count_[k];
-                    const std::complex<float> consensus_raw =
-                        (horiz[k] + wb * p_below + wa * p_above) / denom;
+                    const std::complex<float> consensus_raw = (horiz[k] + wb * p_below + wa * p_above);
+                    /* const float denom = 1.0f + consensus_weight * neighbor_count_[k];
+                     * consensus_raw /= denom;
+                     * 重み付き平均なので理論的には必要だが、この振幅はどうせ正規化でなくなるので省略
+                     */
+
                     const float raw_mag_sq = std::norm(consensus_raw);
+                    const float safe_mag_sq = raw_mag_sq + 1.0e-20f; /* if分を避けるために最小値を足す（0割防止） */
+                    const float inv_mag = 1.0f / std::sqrt(safe_mag_sq);
 
-                    if (raw_mag_sq > kConsensusNormFloorSq_) {
-                        const float inv_mag = 1.0f / std::sqrt(raw_mag_sq);
-                        const std::complex<float> consensus_unit =
-                            consensus_raw * inv_mag;
-                        // Preserve original magnitude and keep consensus as phase-only.
-                        cons[k] = consensus_unit * mag_out[k];
-                        phase_cons[k] = std::arg(consensus_unit);
-                    } else {
-                        // Degenerate cancellation: keep legacy phase/magnitude.
-                        cons[k] = horiz[k];
-                        phase_cons[k] = legacy[k];
-                    }
+                    const std::complex<float> consensus_unit = consensus_raw * inv_mag; /* 正規化 */
+                    const std::complex<float> blended = consensus_unit * mag_out[k]; /* 元の振幅を復元 */
+
+                    cons[k] = (raw_mag_sq > kConsensusNormFloorSq_)? blended : horiz[k]; /* 垂直位相補正の相殺で振幅が消えてたら水平位相補正だけにする */
                 }
             }
         }
 
+        /* IFFT & Overlap-add */
         float hop_peak = 0.0f;
         for (int ch = 0; ch < channel_count_; ++ch) {
             auto& frame = time_frame_[ch];
@@ -296,23 +299,22 @@ private:
             auto& norm = synthesis_norm_[ch];
             auto& legacy = legacy_phase_[ch];
             auto& mag_out = magnitude_[ch];
-            auto& phase_cons = consensus_phase_[ch];
+            auto& cons = consensus_complex_[ch];
             for (int k = 0; k < bin_count_; ++k) {
-                float out_phase = legacy[k];
                 if (use_consensus) {
-                    const float delta = wrap_phase(phase_cons[k] - out_phase);
-                    out_phase = wrap_phase(out_phase + w * delta);
+                    spectrum_[ch][k] = cons[k];
+                } else {
+                    spectrum_[ch][k] = std::polar(mag_out[k], legacy[k]);
                 }
-                spectrum_[ch][k] = std::polar(mag_out[k], out_phase);
             }
 
             fft_.inverse_real(spectrum_[ch].data(), frame.data());
 
             for (int i = 0; i < fft_size_; ++i) {
-                const float w = window_[i];
-                const float w2 = w * w;
-                accum[i] += frame[i] * w;
-                norm[i] += w2;
+                const float win = window_[i];
+                const float win2 = win * win;
+                accum[i] += frame[i] * win;
+                norm[i] += win2;
             }
 
             for (int i = 0; i < syn_hop; ++i) {
@@ -336,7 +338,7 @@ private:
             return false;
         }
 
-        has_phase_history_ = true;
+   has_phase_history_ = true;
         output_ring_buffer_.write(
             const_cast<const float* const*>(hop_ptrs_.data()), 0, syn_hop);
         analysis_read_pos_ += static_cast<double>(analysis_hop_);
