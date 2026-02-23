@@ -11,11 +11,11 @@ PhaseVocoder g_phase_vocoder;
 int g_sample_rate = 48000;
 int g_channels = 2;
 bool g_initialized = false;
-float g_ratio = 1.0f;
+float g_playback_rate = 1.0f;
 float g_phase_control = 0.0f;
 
 void apply_runtime_controls() {
-    g_phase_vocoder.setRatio(g_ratio);
+    g_phase_vocoder.setPlaybackRate(g_playback_rate);
     g_phase_vocoder.setPhaseControl(g_phase_control);
 }
 
@@ -42,9 +42,9 @@ void ts_reset() {
 }
 
 EMSCRIPTEN_KEEPALIVE
-void ts_setRatio(float ratio) {
-    g_ratio = ratio;
-    g_phase_vocoder.setRatio(g_ratio);
+void ts_setPlaybackRate(float rate) {
+    g_playback_rate = rate;
+    g_phase_vocoder.setPlaybackRate(g_playback_rate);
 }
 
 EMSCRIPTEN_KEEPALIVE

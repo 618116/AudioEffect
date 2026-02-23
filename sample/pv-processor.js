@@ -85,8 +85,8 @@ class PVProcessor extends AudioWorkletProcessor {
       case 'pause':
         this.playing = false;
         break;
-      case 'ratio':
-        if (this.wasm) this.wasm._ts_setRatio(data.value);
+      case 'playbackRate':
+        if (this.wasm) this.wasm._ts_setPlaybackRate(data.value);
         break;
       case 'phase':
         if (this.wasm) this.wasm._ts_setPhaseControl(data.value);

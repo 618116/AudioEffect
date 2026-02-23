@@ -8,7 +8,7 @@ SRC         = $(SRC_DIR)/time_stretcher_wrapper.cpp
 OUT         = $(BUILD_DIR)/pv.js
 
 CXXFLAGS    = -O3 -std=c++17 -I$(SRC_DIR)
-LDFLAGS     = -s EXPORTED_FUNCTIONS="['_malloc','_free','_ts_init','_ts_reset','_ts_setRatio','_ts_setPhaseControl','_ts_getNumNeededSamples','_ts_process']" \
+LDFLAGS     = -s EXPORTED_FUNCTIONS="['_malloc','_free','_ts_init','_ts_reset','_ts_setPlaybackRate','_ts_setPhaseControl','_ts_getNumNeededSamples','_ts_process']" \
               -s EXPORTED_RUNTIME_METHODS="['ccall','cwrap','HEAPU32','HEAPF32']" \
               -s MODULARIZE=1 \
               -s ASSERTIONS=0 \

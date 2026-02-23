@@ -125,9 +125,9 @@
     <div class="slider-group">
       <div class="slider-label">
         <span>Speed</span>
-        <span class="slider-value" id="ratioVal">1.0x</span>
+        <span class="slider-value" id="speedVal">1.0x</span>
       </div>
-      <input type="range" id="ratio" min="0.5" max="2.0" step="0.1" value="1.0">
+      <input type="range" id="speed" min="0.5" max="2.0" step="0.1" value="1.0">
     </div>
 
     <div class="toggle-row">
@@ -163,8 +163,8 @@
   const $ = (id) => document.getElementById(id);
   const info = $('info');
   const status = $('status');
-  const ratioIn = $('ratio');
-  const ratioVal = $('ratioVal');
+  const speedIn = $('speed');
+  const speedVal = $('speedVal');
   const phaseToggle = $('phaseToggle');
   const phaseVal = $('phaseVal');
   const playBtn = $('playBtn');
@@ -218,10 +218,10 @@
     updateUI();
   });
 
-  ratioIn.addEventListener('input', () => {
-    const v = parseFloat(ratioIn.value);
-    ratioVal.textContent = v.toFixed(1) + 'x';
-    send('ratio', { value: v });
+  speedIn.addEventListener('input', () => {
+    const v = parseFloat(speedIn.value);
+    speedVal.textContent = v.toFixed(1) + 'x';
+    send('playbackRate', { value: v });
   });
 
   phaseToggle.addEventListener('change', () => {
@@ -280,7 +280,7 @@
       node.connect(ctx.destination);
       node.port.onmessage = onWorkletMsg;
 
-      send('ratio', { value: parseFloat(ratioIn.value) });
+      send('playbackRate', { value: parseFloat(speedIn.value) });
       send('phase', { value: phaseToggle.checked ? 1.0 : 0.0 });
 
       const selected = document.querySelector('input[name="source"]:checked');

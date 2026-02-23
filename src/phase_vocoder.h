@@ -66,61 +66,63 @@ protected:
     }
 
 private:
-    static constexpr int kFixedFftSize_ = 4096;
-    static constexpr float kPi_ = 3.14159265358979323846f;
-    static constexpr float kTwoPi_ = 2.0f * kPi_;
-    static constexpr float kMinStretchRatio_ = 0.5f;
-    int fft_size_ = 0;
-    int analysis_hop_ = 0;
-    int max_syn_hop_ = 0;
-    int bin_count_ = 0;
-    double analysis_read_pos_ = 0.0;
-    bool has_phase_history_ = false;
-    SimpleFFT fft_;
-    static constexpr float kNormFloor_ = 1.0e-6f;
-    static constexpr float kDrainEpsilon_ = 1.0e-8f;
-    static constexpr float kConsensusNormFloorSq_ = 1.0e-20f;
+    static constexpr int kFixedFftSize_ = 4096;              /* FFTサイズ（デモでは固定） */
+    static constexpr float kPi_ = 3.14159265358979323846f;   
+    static constexpr float kTwoPi_ = 2.0f * kPi_;            
+    static constexpr float kMinPlaybackRate_ = 0.5f;         /* 内部計算で許容する最小ストレッチ比（デモでは固定） */
+    int fft_size_ = 0;                                        /* 現在使っているFFTサイズ */
+    int analysis_hop_ = 0;                                    /* 解析側のホップサイズ */
+    int max_syn_hop_ = 0;                                     /* 合成ホップの最大値（バッファ確保用） */
+    int bin_count_ = 0;                                       /* 実数FFTの有効ビン数 */
+    double analysis_read_pos_ = 0.0;                          /* 入力リングバッファの読み取り位置 */
+    bool has_phase_history_ = false;                          /* 前回フレームの位相履歴があるか */
+    SimpleFFT fft_;                                           /* FFT/IFFTを実行するヘルパ */
+    static constexpr float kNormFloor_ = 1.0e-6f;            /* 正規化時のゼロ割り防止しきい値 */
+    static constexpr float kDrainEpsilon_ = 1.0e-8f;         /* 入力終端時の無音判定しきい値 */
+    static constexpr float kConsensusNormFloorSq_ = 1.0e-20f;/* consensus正規化の最小ノルム二乗 */
 
-    std::vector<float> window_;
-    std::vector<std::vector<float>> time_frame_;
-    std::vector<std::vector<float>> synthesis_accum_;
-    std::vector<std::vector<float>> synthesis_norm_;
-    std::vector<std::vector<float>> hop_frame_;
-    std::vector<float*> hop_ptrs_;
+    std::vector<float> window_;                               /* ハン窓テーブル */
+    std::vector<std::vector<float>> time_frame_;             /* チャンネルごとの時間領域フレーム */
+    std::vector<std::vector<float>> synthesis_accum_;        /* OLA加算バッファ */
+    std::vector<std::vector<float>> synthesis_norm_;         /* OLA正規化係数バッファ */
+    std::vector<std::vector<float>> hop_frame_;              /* 1ホップ分の出力一時バッファ */
+    std::vector<float*> hop_ptrs_;                           /* ring buffer書き込み用ポインタ配列 */
 
-    std::vector<std::vector<std::complex<float>>> spectrum_;
-    std::vector<std::vector<float>> prev_phase_;
-    std::vector<std::vector<float>> sum_phase_;
-    std::vector<std::vector<float>> legacy_phase_;
-    std::vector<std::vector<float>> magnitude_;
-    std::vector<std::vector<float>> original_phase_;
-    std::vector<std::vector<std::complex<float>>> horizontal_;
-    std::vector<std::vector<std::complex<float>>> consensus_complex_;
-    std::vector<std::vector<std::complex<float>>> gradient_unit_;
+    std::vector<std::vector<std::complex<float>>> spectrum_;         /* 周波数領域スペクトル */
+    std::vector<std::vector<float>> prev_phase_;                     /* 前回の解析位相 */
+    std::vector<std::vector<float>> sum_phase_;                      /* 位相累積値（PV本体） */
+    std::vector<std::vector<float>> legacy_phase_;                   /* 最終採用する位相 */
+    std::vector<std::vector<float>> magnitude_;                      /* 各ビンの振幅 */
+    std::vector<std::vector<float>> original_phase_;                 /* 入力スペクトルの元位相 */
+    std::vector<std::vector<std::complex<float>>> horizontal_;       /* 水平方向伝播用スペクトル */
+    std::vector<std::vector<std::complex<float>>> consensus_complex_;/* consensus適用後スペクトル */
+    std::vector<std::vector<std::complex<float>>> gradient_unit_;    /* 隣接ビン位相差の単位ベクトル */
 
-    std::vector<int> below_index_;
-    std::vector<int> above_index_;
-    std::vector<float> below_mask_;
-    std::vector<float> above_mask_;
+    std::vector<int> below_index_;                            /* 下側隣接ビンのindex */
+    std::vector<int> above_index_;                            /* 上側隣接ビンのindex */
+    std::vector<float> below_mask_;                           /* 下側隣接ビンが存在するかのマスク */
+    std::vector<float> above_mask_;                           /* 上側隣接ビンが存在するかのマスク */
 
+    /* 位相を [-pi, pi) の範囲に折り返す */
     static float wrap_phase(float phase) {
         phase = std::fmod(phase + kPi_, kTwoPi_);
         if (phase < 0.0f) phase += kTwoPi_;
         return phase - kPi_;
     }
 
+    /* 現在の再生レートから合成ホップサイズを計算する */
     int synthesis_hop() const {
-        // Ratio > 1.0 means slower output, so synthesis hop is smaller.
-        const float ratio = std::max(kMinStretchRatio_, time_stretch_ratio_);
+        const float rate = std::max(kMinPlaybackRate_, playback_rate_);
         int hop = static_cast<int>(std::lround(
-            static_cast<double>(analysis_hop_) / static_cast<double>(ratio)));
+            static_cast<double>(analysis_hop_) / static_cast<double>(rate)));
         return std::max(1, hop);
     }
 
+    /* FFT設定とチャンネル数に合わせて内部バッファを再確保する */
     void resize_state_buffers() {
         max_syn_hop_ = std::max(
             1, static_cast<int>(std::lround(static_cast<double>(analysis_hop_)
-                                            / static_cast<double>(kMinStretchRatio_))));
+                                            / static_cast<double>(kMinPlaybackRate_))));
         time_frame_.assign(channel_count_, std::vector<float>(fft_size_, 0.0f));
         synthesis_accum_.assign(channel_count_, std::vector<float>(fft_size_, 0.0f));
         synthesis_norm_.assign(channel_count_, std::vector<float>(fft_size_, 0.0f));
@@ -162,6 +164,7 @@ private:
         }
     }
 
+    /* 1ホップ分の解析・位相処理・合成を実行する */
     bool produce_one_hop() {
         const int syn_hop = synthesis_hop();
         if (syn_hop > max_syn_hop_) {
@@ -349,6 +352,7 @@ private:
         return true;
     }
 
+    /* 読み取り済み入力を破棄してリングバッファを圧縮する */
     void compact() {
         // Keep one FFT frame of history before the read position.
         int safe_discard = static_cast<int>(std::floor(analysis_read_pos_)) - fft_size_;
