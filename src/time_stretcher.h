@@ -37,12 +37,12 @@ public:
         onReset();
     }
 
-    void setRatio(float ratio) {
-        float clamped_ratio = std::clamp(ratio, 0.5f, 2.0f);
-        time_stretch_ratio_ = std::round(clamped_ratio * 10.0f) / 10.0f;
+    void setPlaybackRate(float rate) {
+        float clamped = std::clamp(rate, 0.5f, 2.0f);
+        playback_rate_ = std::round(clamped * 10.0f) / 10.0f;
     }
 
-    float getRatio() const { return time_stretch_ratio_; }
+    float getPlaybackRate() const { return playback_rate_; }
 
     void setPhaseControl(float control) {
         phase_control_ = std::clamp(control, 0.0f, 1.0f);
@@ -52,15 +52,15 @@ public:
 
     int getNumNeededSamples(int output_sample_count) const {
         return static_cast<int>(
-            std::ceil(output_sample_count * static_cast<double>(time_stretch_ratio_)));
+            std::ceil(output_sample_count * static_cast<double>(playback_rate_)));
     }
 
     int process(const float* const* input, int input_sample_count, bool input_ended,
                 float** output, int output_sample_count) {
-        const bool passthrough = (time_stretch_ratio_ == 1.0f);
+        const bool passthrough = (playback_rate_ == 1.0f);
         if (passthrough) {
             // Keep passthrough bit-perfect and avoid stale buffered audio when
-            // ratio toggles between 1.0 and stretched modes.
+            // playback rate toggles between 1.0 and stretched modes.
             if (!passthrough_active_) {
                 reset();
                 passthrough_active_ = true;
@@ -143,7 +143,7 @@ protected:
 
     int sampling_rate_ = 44100;
     int channel_count_ = 2;
-    float time_stretch_ratio_ = 1.0f;
+    float playback_rate_ = 1.0f;
     float phase_control_ = 0.0f;
     bool input_ended_ = false;
     bool passthrough_active_ = false;
