@@ -3,6 +3,7 @@ Phase Vocoderを使ったリアルタイムタイムストレッチ
 
 # ビルド環境
 Emscripten 5.0.2
+Windows 11
 
 # デモ動作環境
 Google Chrome 145.0.7632.110(Windows)

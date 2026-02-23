@@ -411,7 +411,7 @@ P_above = H[k+1] * conj(V[k+1])</pre>
       ctx = new AudioContext();
       sr = ctx.sampleRate;
 
-      await ctx.audioWorklet.addModule('../build/pv-worklet.js');
+      await ctx.audioWorklet.addModule('../pv-worklet.js');
 
       node = new AudioWorkletNode(ctx, 'pv-processor', {
         numberOfInputs: 0,

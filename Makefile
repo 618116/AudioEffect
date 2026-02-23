@@ -27,6 +27,7 @@ $(OUT): $(SRC) $(SRC_DIR)/phase_vocoder.h $(SRC_DIR)/simple_fft.h $(SRC_DIR)/tim
 
 $(WORKLET): $(OUT) $(PROC_SRC)
 	python -c "open('$(WORKLET)','wb').write(open('$(OUT)','rb').read()+b'\n'+open('$(PROC_SRC)','rb').read())"
+	copy /y $(subst /,\,$(WORKLET)) sample\
 
 $(BUILD_DIR):
 	if not exist $(BUILD_DIR) mkdir $(BUILD_DIR)
