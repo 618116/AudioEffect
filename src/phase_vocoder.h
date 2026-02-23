@@ -73,6 +73,7 @@ private:
     SimpleFFT fft_;
     static constexpr float kNormFloor_ = 1.0e-6f;
     static constexpr float kDrainEpsilon_ = 1.0e-8f;
+    static constexpr float kConsensusNormFloorSq_ = 1.0e-20f;
 
     std::vector<float> window_;
     std::vector<std::vector<float>> time_frame_;
@@ -268,8 +269,22 @@ private:
                         horiz[above] * std::conj(grad[above]);
 
                     const float denom = 1.0f + w * neighbor_count_[k];
-                    cons[k] = (horiz[k] + wb * p_below + wa * p_above) / denom;
-                    phase_cons[k] = std::arg(cons[k]);
+                    const std::complex<float> consensus_raw =
+                        (horiz[k] + wb * p_below + wa * p_above) / denom;
+                    const float raw_mag_sq = std::norm(consensus_raw);
+
+                    if (raw_mag_sq > kConsensusNormFloorSq_) {
+                        const float inv_mag = 1.0f / std::sqrt(raw_mag_sq);
+                        const std::complex<float> consensus_unit =
+                            consensus_raw * inv_mag;
+                        // Preserve original magnitude and keep consensus as phase-only.
+                        cons[k] = consensus_unit * mag_out[k];
+                        phase_cons[k] = std::arg(consensus_unit);
+                    } else {
+                        // Degenerate cancellation: keep legacy phase/magnitude.
+                        cons[k] = horiz[k];
+                        phase_cons[k] = legacy[k];
+                    }
                 }
             }
         }
